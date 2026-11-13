@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { AppError, type Session, type SessionSummary } from "./types";
+import { AppError, type CallLog, type Session, type SessionSummary } from "./types";
 
 const queues = new Map<string, Promise<unknown>>();
 const remote = () => Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
@@ -68,6 +68,18 @@ export async function saveSession(session: Session): Promise<void> {
   }
   await fs.writeFile(path.join(output, "llm-calls.json"), JSON.stringify(session.logs, null, 2), "utf8");
   await fs.writeFile(path.join(output, "session.json"), JSON.stringify(session, null, 2), "utf8");
+}
+
+export async function saveProviderCheck(logs: CallLog[]): Promise<string> {
+  const id = randomUUID();
+  const record = JSON.stringify({ id, at: new Date().toISOString(), logs }, null, 2);
+  if (remote()) await redis(["SET", `dba:provider-check:${id}`, record, "EX", 2592000]);
+  else {
+    const directory = path.join(dataRoot(), "provider-checks");
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, `${id}.json`), record, { encoding: "utf8", mode: 0o600 });
+  }
+  return id;
 }
 
 export async function withSessionLock<T>(id: string, operation: () => Promise<T>): Promise<T> {

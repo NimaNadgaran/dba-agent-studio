@@ -55,6 +55,19 @@ export function automaticIndexes(table: Table): Table["indexes"] {
   });
 }
 
+export function relationshipIsUnique(table: Table, columns: string[]): boolean {
+  return [table.primaryKey, ...table.unique, ...table.indexes.filter(index => index.unique).map(index => index.columns)].some(key => key.every(name => columns.includes(name)));
+}
+
+export function columnDomainChecks(table: Table, dbms: DBMS): string[] {
+  return table.columns.flatMap(column => {
+    const identifier = quoteIdentifier(column.name, dbms);
+    if (column.type === "boolean" && dbms !== "PostgreSQL") return [`${identifier} IN (0, 1)`];
+    if (column.type === "string" && dbms === "SQLite") return [`length(${identifier}) <= ${column.length ?? 255}`];
+    return [];
+  });
+}
+
 export function validateDesign(design: Design): void {
   unique(design.tables.map(table => table.name), "table names");
   unique(design.tables.flatMap(table => [...table.indexes, ...automaticIndexes(table)].map(index => index.name)), "index names");
@@ -125,7 +138,7 @@ export function validateDesign(design: Design): void {
         const values = key.columns.map(name => Object.hasOwn(row, name) ? row[name] : columns.get(name)?.default ?? null);
         if (values.some(value => value === null)) continue;
         const parent = design.tables.find(candidate => candidate.name === key.refTable)!;
-        if (!parent.rows.some(parentRow => key.refColumns.every((name, position) => parentRow[name] === values[position]))) throw new AppError(`Seed foreign key has no parent: ${table.name} → ${key.refTable}.`);
+        if (!parent.rows.some(parentRow => key.refColumns.every((name, position) => (Object.hasOwn(parentRow, name) ? parentRow[name] : parent.columns.find(column => column.name === name)?.default ?? null) === values[position]))) throw new AppError(`Seed foreign key has no parent: ${table.name} → ${key.refTable}.`);
       }
     }
   }
@@ -136,24 +149,29 @@ export function generateSQL(design: Design, dbms: DBMS): { schema: string; seed:
   validateDesign(design);
   const quote = (name: string) => quoteIdentifier(name, dbms);
   const tables = orderedTables(design);
-  const schema: string[] = [`-- ${design.name}\n-- Target: ${dbms}. Run in a new, empty database.\n-- IDs are explicitly supplied by the application; no identity/sequence allocation is assumed.\n`];
+  const comment = (text: string) => text.replace(/\r\n?|\n/g, "\n-- ");
+  const schema: string[] = [`-- ${comment(design.name)}\n-- Target: ${dbms}. Run in a new, empty database.\n-- IDs are explicitly supplied by the application; no identity/sequence allocation is assumed.\n`];
   if (dbms === "SQLite") schema.push("PRAGMA foreign_keys = ON;\n");
   if (dbms === "MySQL") schema.push("SET NAMES utf8mb4;\n");
   for (const table of tables) {
-    const definitions = table.columns.map(column => `  ${quote(column.name)} ${sqlType(column, dbms)}${column.nullable ? "" : " NOT NULL"}${column.default === undefined ? "" : ` DEFAULT ${sqlLiteral(column.default, dbms)}`}`);
+    const definitions = table.columns.map(column => {
+      const defaultLiteral = column.default === undefined ? undefined : sqlLiteral(column.default, dbms);
+      const defaultValue = dbms === "MySQL" && typeof column.default === "string" ? `(${defaultLiteral})` : defaultLiteral;
+      return `  ${quote(column.name)} ${sqlType(column, dbms)}${column.nullable ? "" : " NOT NULL"}${defaultValue === undefined ? "" : ` DEFAULT ${defaultValue}`}`;
+    });
     definitions.push(`  PRIMARY KEY (${table.primaryKey.map(quote).join(", ")})`);
     table.unique.forEach(names => definitions.push(`  UNIQUE (${names.map(quote).join(", ")})`));
     table.checks.forEach(check => definitions.push(`  CONSTRAINT ${quote(check.name)} CHECK (${check.expression})`));
-    table.columns.filter(column => column.type === "boolean" && dbms !== "PostgreSQL").forEach(column => definitions.push(`  CHECK (${quote(column.name)} IN (0, 1))`));
+    columnDomainChecks(table, dbms).forEach(expression => definitions.push(`  CHECK (${expression})`));
     table.foreignKeys.forEach(key => definitions.push(`  FOREIGN KEY (${key.columns.map(quote).join(", ")}) REFERENCES ${quote(key.refTable)} (${key.refColumns.map(quote).join(", ")}) ON DELETE ${dbms === "SQL Server" && key.onDelete === "RESTRICT" ? "NO ACTION" : key.onDelete}`));
     schema.push(`CREATE TABLE ${quote(table.name)} (\n${definitions.join(",\n")}\n)${dbms === "MySQL" ? " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4" : ""};\n`);
     table.indexes.forEach(index => schema.push(`CREATE ${index.unique ? "UNIQUE " : ""}INDEX ${quote(index.name)} ON ${quote(table.name)} (${index.columns.map(quote).join(", ")});\n`));
     automaticIndexes(table).forEach(index => schema.push(`CREATE INDEX ${quote(index.name)} ON ${quote(table.name)} (${index.columns.map(quote).join(", ")});\n`));
   }
-  const seed = [`-- Meaningful sample data for ${design.name}\n-- Execute after schema.sql in the same empty database.\n${dbms === "SQLite" ? "PRAGMA foreign_keys = ON;\n" : ""}${dbms === "SQL Server" ? "BEGIN TRANSACTION;" : "BEGIN;"}\n`];
+  const seed = [`-- Meaningful sample data for ${comment(design.name)}\n-- Execute after schema.sql in the same empty database.\n${dbms === "SQLite" ? "PRAGMA foreign_keys = ON;\n" : ""}${dbms === "SQL Server" ? "BEGIN TRANSACTION;" : "BEGIN;"}\n`];
   for (const table of tables) {
     const names = table.columns.map(column => column.name);
-    seed.push(`-- ${table.purpose}\nINSERT INTO ${quote(table.name)} (${names.map(quote).join(", ")}) VALUES\n${table.rows.map(row => `  (${table.columns.map(column => sqlLiteral(Object.hasOwn(row, column.name) ? row[column.name] : column.default ?? null, dbms)).join(", ")})`).join(",\n")};\n`);
+    seed.push(`-- ${comment(table.purpose)}\nINSERT INTO ${quote(table.name)} (${names.map(quote).join(", ")}) VALUES\n${table.rows.map(row => `  (${table.columns.map(column => sqlLiteral(Object.hasOwn(row, column.name) ? row[column.name] : column.default ?? null, dbms)).join(", ")})`).join(",\n")};\n`);
   }
   seed.push("COMMIT;\n");
   return { schema: schema.join("\n"), seed: seed.join("\n") };
@@ -170,7 +188,7 @@ export function mermaidDiagram(design: Design, dbms?: DBMS): string {
     lines.push("  }");
     table.foreignKeys.forEach(key => {
       const optional = key.columns.some(name => table.columns.find(column => column.name === name)?.nullable);
-      const isUnique = [table.primaryKey, ...table.unique].some(names => names.length === key.columns.length && names.every(name => key.columns.includes(name)));
+      const isUnique = relationshipIsUnique(table, key.columns);
       lines.push(`  ${key.refTable} ${optional ? "|o" : "||"}--${isUnique ? "o|" : "o{"} ${table.name} : "${key.columns.join("_")}"`);
     });
   }

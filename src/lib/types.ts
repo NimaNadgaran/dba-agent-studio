@@ -10,6 +10,11 @@ export const providerSchema = z.object({
   baseUrl: z.string().max(300).default(""),
 });
 export type ProviderConfig = z.infer<typeof providerSchema>;
+export const agentStageSchema = z.enum(["intake", "interview", "selection", "design", "revision", "repair"]);
+export const agentConfigsSchema = z.partialRecord(agentStageSchema, providerSchema);
+export const apiKeysSchema = z.record(z.string().max(300), z.string().max(1000)).refine(keys => Object.keys(keys).length <= 20, "Too many API keys.");
+export type AgentConfigs = z.infer<typeof agentConfigsSchema>;
+export type ApiKeys = Record<string, string>;
 export const intakeSchema = z.object({
   title: z.string().min(3).max(100),
   summary: z.string().min(30),
@@ -90,7 +95,7 @@ export type Stage = 1 | 2 | 3 | 4 | 5 | 6;
 export type Artifact = { name: string; content: string; stage: Stage; updatedAt: string; version: number };
 export type CallLog = {
   id: string; at: string; stage: string; provider: string; model: string; attempt: number;
-  durationMs: number; status: "success" | "error"; input: string; output: string; error?: string;
+  durationMs: number; status: "success" | "error"; input: string; output: string; error?: string; baseUrl?: string; resolvedModel?: string;
 };
 export type Validation = {
   engine: string; status: "passed" | "failed" | "structural"; attempts: number; durationMs: number;
@@ -101,6 +106,7 @@ export type InterviewRound = { questions: Question[]; answers: Record<string, st
 export type Session = {
   id: string; title: string; description: string; createdAt: string; updatedAt: string; version: number;
   stage: Stage; completedStages: Stage[]; mode: "demo" | "live"; config: ProviderConfig;
+  agentConfigs?: AgentConfigs;
   intake?: Intake; interview: { rounds: InterviewRound[]; pending: Question[]; ready: boolean; summary: string; rationale: string };
   choice?: Choice; design?: Design; designVersion: number; approvedAt?: string;
   artifacts: Record<string, Artifact>; changes: Change[]; logs: CallLog[];

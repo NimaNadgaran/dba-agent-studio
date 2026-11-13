@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "test:e2e": "playwright test",
+    "test:live": "tsx scripts/live-example.ts",
     "example": "tsx scripts/example.ts",
     "check": "npm run typecheck && npm test && npm run build"
   },

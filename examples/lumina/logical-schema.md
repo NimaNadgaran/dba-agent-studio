@@ -22,6 +22,7 @@ Member identity, optional preferred space and contact information, separable fro
 - **Unique keys:** (email)
 - **Foreign keys:** (preferred_space_id) → spaces(id); ON DELETE SET NULL
 - **Checks:** None
+- **Compiler-added column domains:** None beyond declared types
 - **Declared indexes:** None
 - **Automatic indexing:** primary/unique keys are indexed by the engine. The SQL compiler adds an index on each foreign-key column group not already covered by a leading primary/unique/declared index.
 - **Sample rows:** 3
@@ -41,6 +42,7 @@ Subscription products with stable pricing and included workspace hours.
 - **Unique keys:** (name)
 - **Foreign keys:** None
 - **Checks:** plans_nonnegative: monthly_price >= 0 AND included_hours >= 0
+- **Compiler-added column domains:** None beyond declared types
 - **Declared indexes:** None
 - **Automatic indexing:** primary/unique keys are indexed by the engine. The SQL compiler adds an index on each foreign-key column group not already covered by a leading primary/unique/declared index.
 - **Sample rows:** 3
@@ -61,6 +63,7 @@ Effective-dated member subscriptions preserving plan enrollment history.
 - **Unique keys:** (member_id, starts_on)
 - **Foreign keys:** (member_id) → members(id); ON DELETE RESTRICT; (plan_id) → plans(id); ON DELETE RESTRICT
 - **Checks:** memberships_date_order: ends_on IS NULL OR ends_on > starts_on
+- **Compiler-added column domains:** None beyond declared types
 - **Declared indexes:** None
 - **Automatic indexing:** primary/unique keys are indexed by the engine. The SQL compiler adds an index on each foreign-key column group not already covered by a leading primary/unique/declared index.
 - **Sample rows:** 3
@@ -81,6 +84,7 @@ Bookable rooms and desks, each with a location label, capacity and hourly rate.
 - **Unique keys:** (location, name)
 - **Foreign keys:** None
 - **Checks:** spaces_valid_capacity_rate: capacity > 0 AND hourly_rate >= 0
+- **Compiler-added column domains:** None beyond declared types
 - **Declared indexes:** None
 - **Automatic indexing:** primary/unique keys are indexed by the engine. The SQL compiler adds an index on each foreign-key column group not already covered by a leading primary/unique/declared index.
 - **Sample rows:** 3
@@ -98,6 +102,7 @@ Reusable amenity definitions shared by multiple bookable spaces.
 - **Unique keys:** (name)
 - **Foreign keys:** None
 - **Checks:** None
+- **Compiler-added column domains:** None beyond declared types
 - **Declared indexes:** None
 - **Automatic indexing:** primary/unique keys are indexed by the engine. The SQL compiler adds an index on each foreign-key column group not already covered by a leading primary/unique/declared index.
 - **Sample rows:** 3
@@ -115,6 +120,7 @@ Associative relation implementing the many-to-many space-to-amenity relationship
 - **Unique keys:** None beyond primary key
 - **Foreign keys:** (space_id) → spaces(id); ON DELETE CASCADE; (amenity_id) → amenities(id); ON DELETE CASCADE
 - **Checks:** None
+- **Compiler-added column domains:** None beyond declared types
 - **Declared indexes:** None
 - **Automatic indexing:** primary/unique keys are indexed by the engine. The SQL compiler adds an index on each foreign-key column group not already covered by a leading primary/unique/declared index.
 - **Sample rows:** 5
@@ -137,6 +143,7 @@ UTC reservation intervals with lifecycle state and an optional member-supplied n
 - **Unique keys:** None beyond primary key
 - **Foreign keys:** (member_id) → members(id); ON DELETE RESTRICT; (space_id) → spaces(id); ON DELETE RESTRICT
 - **Checks:** bookings_interval: ends_at > starts_at; bookings_status: status IN ('confirmed', 'completed', 'cancelled')
+- **Compiler-added column domains:** None beyond declared types
 - **Declared indexes:** bookings_availability_idx (space_id, starts_at, ends_at); bookings_member_history_idx (member_id, starts_at)
 - **Automatic indexing:** primary/unique keys are indexed by the engine. The SQL compiler adds an index on each foreign-key column group not already covered by a leading primary/unique/declared index.
 - **Sample rows:** 3
@@ -159,6 +166,7 @@ Retained member invoices independent of optional booking activity; no payment ca
 - **Unique keys:** (invoice_number)
 - **Foreign keys:** (member_id) → members(id); ON DELETE RESTRICT
 - **Checks:** invoices_amount: amount >= 0; invoices_dates: due_on >= issued_on; invoices_status: status IN ('draft', 'paid', 'overdue')
+- **Compiler-added column domains:** None beyond declared types
 - **Declared indexes:** invoices_status_due_idx (status, due_on)
 - **Automatic indexing:** primary/unique keys are indexed by the engine. The SQL compiler adds an index on each foreign-key column group not already covered by a leading primary/unique/declared index.
 - **Sample rows:** 3

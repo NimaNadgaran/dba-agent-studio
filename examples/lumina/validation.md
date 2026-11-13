@@ -6,7 +6,7 @@
 
 **Attempts:** 1
 
-**Duration:** 878 ms
+**Duration:** 718 ms
 
 | Check | Result | Detail |
 | --- | --- | --- |

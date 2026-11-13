@@ -1,13 +1,15 @@
 # DBA Agent Studio
 
-A local-first database-design website implementing the six-stage workflow in `../dba_agent_project.pdf`. The client can inspect each stage's output before continuing. No GitHub push or Vercel deployment is required or performed.
+A local-first, LLM-powered database-design studio with adaptive interviews, relational DBMS comparison, consistent design documents and diagrams, iterative revisions, and validated SQL exports. It implements the six-stage course assignment; the original PDF is kept locally outside this repository.
+
+Public repository: [NimaNadgaran/dba-agent-studio](https://github.com/NimaNadgaran/dba-agent-studio). The first commit preserves the offline baseline with the message `first sprint with no real api agent`. No hosting deployment is performed.
 
 ## Start locally
 
 Requirements: Node.js 22.12+ (Node 24 LTS recommended), npm, and a modern browser. Development and production servers bind to **127.0.0.1**, not the public network.
 
 ```powershell
-cd D:\project2\project_code
+cd project_code
 npm install
 npm run dev
 ```
@@ -21,24 +23,54 @@ npm run build
 npm start
 ```
 
-## Live model/provider configuration
+## Live providers and personal API keys
 
-The offline example is a **labelled deterministic fixture**, not an LLM pretending to understand an arbitrary brief. For your own system, configure a live provider in **Settings & providers**, then create a new design workspace. Providers must support the OpenAI-compatible `/chat/completions` API and `response_format: {type: "json_object"}`. Supported configurations include compatible gateways (such as GapGPT/OpenRouter), a custom compatible provider, and Ollama's compatible endpoint.
+Presets are based on the teacher's [awesome-free-llm-apis list](https://github.com/mnfst/awesome-free-llm-apis), checked on November 13, 2026. That repository lists services, **not personal credentials**. No real keys are included in source, examples or Git history. Free access, quotas, model availability, region eligibility and data-use policies are controlled by each provider and can change.
 
-The browser can supply a temporary key; it stays in React memory and clears on refresh. For persistent server configuration, copy `.env.example` to `.env.local` and edit it:
+| Preset | API base URL | Key setup |
+| --- | --- | --- |
+| Kilo Gateway | `https://ai-gateway.kilo.ai/api/v1` | Anonymous free access; leave key blank. Default `kilo-auto/free`. |
+| Groq | `https://api.groq.com/openai/v1` | Get your own key at [Groq Console](https://console.groq.com/keys); optional server variable `GROQ_API_KEY`. |
+| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | Get your own key at [AI Studio](https://aistudio.google.com/apikey); optional `GEMINI_API_KEY`. Load available models and check free-tier eligibility. |
+| OpenRouter | `https://openrouter.ai/api/v1` | Get your own key at [OpenRouter](https://openrouter.ai/settings/keys); optional `OPENROUTER_API_KEY`. Free router and `:free` models only in this preset. |
+| Ollama | `http://localhost:11434/v1` | Local installation/model required; normally no key. |
+| Custom compatible API | Your explicit base URL | Your personal key, or endpoint-scoped `LLM_API_KEY` below. |
+
+### Start without a personal API key
+
+1. Open **Settings & providers**, or **New design**. A fresh installation defaults to the live Kilo free router; the offline example remains an explicit separate option.
+2. Choose **Kilo Gateway (free, no key)**. Leave the API key empty.
+3. Keep `kilo-auto/free`, or click **Load models** and select an available free model.
+4. Click **Test connection**. This sends a synthetic JSON probe, not your system brief. A successful probe proves connectivity and JSON response handling, not full design quality or future availability.
+5. Save configuration, create a **My own system** workspace, and run each stage explicitly.
+
+Anonymous/public services may log prompts. Use synthetic/public information; do not send confidential business data, real personal information, passwords or other secrets. No fallback silently switches providers or sends a brief to a different endpoint. A free router may itself choose among models; traces record the returned model ID when available.
+
+### Choose each workflow agent
+
+The six model roles are **intake**, **interview**, **DBMS selection**, **design**, **revision**, and **SQL repair**. They are sequential workflow roles, not parallel autonomous agents. Every role can inherit the workspace default or use its own provider and model.
+
+Use **Provider & model per stage** in Settings or beside a live stage: select a **Workflow agent**, uncheck **Use workspace default**, select its provider/model, and click **Save agent selections**. Selections are also saved atomically with the next workflow action. Stage 1 calls both intake and initial-interview roles; SQL compilation is deterministic and only calls the repair role after a validation failure. Approval never invokes a model. All choices and resolved-model traces survive reload; temporary keys do not.
+
+Keys entered in the UI remain in memory, separately scoped to the exact API base URL. Changing providers cannot accidentally forward another provider's key. The application never stores keys in local/session storage, workspace JSON, artifacts or exports. For persistent server setup, copy `.env.example` to **gitignored** `.env.local` and enter your own keys:
 
 ```dotenv
 LLM_PROVIDER=compatible
-LLM_BASE_URL=https://your-provider.example/v1
-LLM_MODEL=your-provider-model-id
-LLM_API_KEY=your-secret-key
+LLM_BASE_URL=https://ai-gateway.kilo.ai/api/v1
+LLM_MODEL=kilo-auto/free
+LLM_API_KEY=
+GROQ_API_KEY=
+GEMINI_API_KEY=
+OPENROUTER_API_KEY=
 LLM_MAX_ATTEMPTS=3
 LLM_TIMEOUT_MS=90000
 ```
 
-For Ollama, use `LLM_PROVIDER=ollama`, `LLM_BASE_URL=http://localhost:11434/v1`, and the exact model ID installed in Ollama. Ensure that model supports the required JSON output. Ollama must run on the same machine as this app's server. Remote providers require HTTPS; local HTTP is allowed only for loopback endpoints. Never enter a provider login/session cookie as an API key.
+Named server keys are only used for their catalog endpoint. `LLM_API_KEY` is only used when the chosen provider/base URL matches `LLM_PROVIDER`/`LLM_BASE_URL`. Restart after environment changes. The Settings screen reports configured-key presence, never the secret value. Ollama must run on the same machine as the app's server. Remote APIs require HTTPS; loopback HTTP is supported for local models and tests. Compatible APIs/models must support JSON-object chat completions.
 
-Restart Next.js after environment changes. UI configuration is saved in browser local storage (no API key); session provider/model/base URL are saved with each workspace. The same-mode configuration can be changed for an existing workspace. Switching between offline/live modes creates a new workspace to preserve provenance. Changing a DBMS happens through a design revision, not a provider setting.
+Connection-test attempts are logged separately under gitignored `data/provider-checks/<uuid>.json` (or Redis diagnostics with 30-day retention); they do not clutter the workspace list. Normal stage attempts remain visible in Activity and the workspace export. Provider references: [Kilo Gateway](https://kilo.ai/docs/gateway/models-and-providers), [Groq compatibility](https://console.groq.com/docs/openai), [Gemini compatibility](https://ai.google.dev/gemini-api/docs/openai), [OpenRouter free models](https://openrouter.ai/collections/free-models/).
+
+The offline Lumina example remains a **labelled deterministic fixture**, not real AI. Switching between fixture/live modes requires a new workspace. Change the database target through a design revision, not provider settings.
 
 ## The workflow
 
@@ -109,6 +141,15 @@ npm run build
 npm run test:e2e
 ```
 
+Optional network checks using only a public synthetic equipment-lending scenario:
+
+```powershell
+npm run test:live -- --probe
+npm run test:live
+```
+
+The full live check runs the real interview, selection, design, phone-number revision, approval and SQLite execution. It writes a resumable local workspace and, on success, `examples/equipment-club-live/`. It is not a deterministic CI test: shared free-model quotas, latency and service outages can cause a failure. Optional `LIVE_PROVIDER`, `LIVE_MODEL` and `LIVE_BASE_URL` select a different catalog provider/model; personal server keys are still required where applicable. Failure traces are saved after workflow actions without claiming completion.
+
 Browser tests use installed Google Chrome by default. Set `CHROME_PATH` to your Chromium executable on another machine. Playwright reuses a local production server on port 3000, or starts one after a build. Tests cover the complete UI flow, diagram rendering, ZIP content, reload/resume, mobile overflow, trace/prompt/settings pages, API ordering/conflicts/origin checks, and production API validation. Unit/integration tests cover real PostgreSQL/SQLite, four dialects, structural invariants, revision propagation, persistence, provider retries/redaction, and automatic repair/reapproval. Mock-provider tests exercise the real adapter without claiming remote model quality.
 
 ## Repository map
@@ -124,4 +165,4 @@ examples/lumina/   Complete generated example output
 docs/              Architecture, critique and compliance reports
 ```
 
-Development journal and final acceptance audit are outside the app at `../PROJECT_LOG.md` and `../PDF_COMPLIANCE_AUDIT.md`. A local Git repository is initialized; no commit, remote, GitHub push, or deployment is performed.
+The original development journal and acceptance audit remain outside the app and describe an earlier offline sprint, not current verification. See `docs/SPRINT_2.md` for the provider integration, fixes, test evidence and remaining limitations. Local data, output directories, keys, build files and browser reports are gitignored. The public repository includes only reviewed source and synthetic examples.

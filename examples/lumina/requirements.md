@@ -95,3 +95,22 @@ All seven dimensions are covered. Follow-up confirmed half-open booking interval
 ## Outstanding questions
 
 - None identified.
+
+## Current requirements after revisions
+
+The original brief and interview above are preserved as history. The following later user requests supersede conflicting earlier requirements. Read these together with the current design.json.
+
+### v2: Add an optional phone number to members
+
+Added optional private member phone numbers, realistic/null sample values, updated functional dependencies and privacy handling. All design artifacts regenerate.
+
+### Current business rules
+
+- Unique member emails, plan names, amenity names, invoice numbers, and space names within a location are enforced by UNIQUE keys.
+- Positive capacity, nonnegative amounts/hours/rates, permitted lifecycle states, and ordered dates are enforced with CHECK constraints.
+- Foreign keys retain member/booking/invoice history through RESTRICT/NO ACTION. Only pure amenity links cascade.
+- No overlapping confirmed bookings: the application must lock the space row and query intersecting intervals in the same transaction before insertion. For SQLite use BEGIN IMMEDIATE and serialize writes. Row-level CHECK constraints do not enforce this cross-row rule.
+- Back-to-back bookings are valid half-open intervals. Cancelled bookings do not block availability.
+- Member data access and location-scoped staff access require application authorization; invoice visibility is limited to billing administrators.
+- Member contact details can be anonymized while the member identifier and invoices remain for seven-year billing retention.
+- Changing booking and invoice status requires an authorized atomic transaction; payment processing uses idempotency at the integration boundary.

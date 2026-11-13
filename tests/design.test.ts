@@ -86,3 +86,42 @@ test("real execution catches violated business CHECK constraints", async () => {
   const result = await validateSQL(design, "SQLite");
   assert.equal(result.status, "failed"); assert.match(result.error || "", /CHECK constraint failed/);
 });
+
+test("unique-index relationships render one-to-one consistently with the schema", () => {
+  const design = demoDesign();
+  const member = design.tables.find(table => table.name === "members")!;
+  member.indexes.push({ name: "members_preferred_unique", columns: ["preferred_space_id"], unique: true });
+  member.rows.forEach((row, index) => { row.preferred_space_id = index === 0 ? 1 : null; });
+  validateDesign(design);
+  assert.ok(mermaidDiagram(design).includes('spaces |o--o| members : "preferred_space_id"'));
+  assert.ok(generateSQL(design, "SQLite").schema.includes('CREATE UNIQUE INDEX "members_preferred_unique"'));
+});
+
+test("multiline model prose stays inside SQL comments", async () => {
+  const design = demoDesign();
+  design.name = "Synthetic example\nDROP TABLE members;";
+  design.tables[0].purpose = "Meaningful members\r\nDROP TABLE spaces;";
+  const sql = generateSQL(design, "SQLite");
+  assert.ok(sql.schema.includes("\n-- DROP TABLE members;"));
+  assert.ok(sql.seed.includes("\n-- DROP TABLE spaces;"));
+  assert.equal((await validateSQL(design, "SQLite")).status, "passed");
+});
+
+test("SQLite enforces declared string lengths on future writes, not just seed validation", async () => {
+  const design = demoDesign();
+  design.tables.find(table => table.name === "members")!.columns.push({ name: "phone", type: "string", length: 30, nullable: true, description: "Optional phone number" });
+  const { default: initSqlJs } = await import("sql.js");
+  const SQLite = await initSqlJs();
+  const database = new SQLite.Database();
+  try {
+    const sql = generateSQL(design, "SQLite"); database.exec(sql.schema); database.exec(sql.seed);
+    assert.throws(() => database.run(`UPDATE members SET phone = '${"1".repeat(31)}' WHERE id = 1`), /CHECK constraint failed/);
+    assert.doesNotThrow(() => database.run("UPDATE members SET phone = NULL WHERE id = 1"));
+  } finally { database.close(); }
+});
+
+test("MySQL string defaults use parenthesized expressions", () => {
+  const design = demoDesign();
+  design.tables[0].columns[1].default = "Example member";
+  assert.ok(generateSQL(design, "MySQL").schema.includes("DEFAULT (CONVERT(X'"));
+});

@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { demoAnswers, newSession, transition } from "../src/lib/workflow";
-import { listSessions, readSession, saveSession, validId, withSessionLock } from "../src/lib/store";
+import { listSessions, readSession, saveProviderCheck, saveSession, validId, withSessionLock } from "../src/lib/store";
 import type { Session } from "../src/lib/types";
 
 const demoConfig = { provider: "demo" as const, model: "", baseUrl: "" };
@@ -51,6 +51,8 @@ test("revisions propagate to every artifact and invalidate approval and old SQL"
   assert.equal(session.stage, 5);
   for (const name of ["conceptual-model.md", "logical-schema.md", "normalization.md", "design.json"]) assert.ok(session.artifacts[name].content.includes("phone"), name);
   assert.ok(session.artifacts["changelog.md"].content.includes("phone number"));
+  assert.ok(session.artifacts["requirements.md"].content.includes("Add an optional phone number to members"));
+  assert.ok(session.changes.at(-1)!.files.includes("requirements.md"));
   await assert.rejects(() => transition(session, { action: "sql" }), /Explicitly approve/);
   await transition(session, { action: "approve" });
   await transition(session, { action: "sql" });
@@ -63,6 +65,7 @@ test("unsupported fixture revisions fail transparently and provenance cannot cha
   await assert.rejects(() => transition(session, { action: "revision", request: "Build an entirely new hospital management system" }), /Offline example revisions support/);
   await assert.rejects(() => transition(session, { action: "config", config: { provider: "compatible", model: "a-model", baseUrl: "https://api.example.org/v1" } }), /preserves provenance/);
   assert.ok(session.logs.every(log => log.provider === "offline-fixture"));
+  await assert.rejects(() => transition(session, { action: "config", agentConfigs: {} }), /live workspace/);
 });
 
 test("sessions resume from disk, output directory contains complete artifacts, stale SQL removed", async () => {
@@ -75,6 +78,10 @@ test("sessions resume from disk, output directory contains complete artifacts, s
   assert.equal(restored.designVersion, session.designVersion); assert.equal(restored.stage, 6);
   assert.ok((await listSessions()).some(item => item.id === session.id));
   assert.equal(await readFile(path.join(temporary, "outputs", session.id, "seed.sql"), "utf8"), session.artifacts["seed.sql"].content);
+  const diagnosticId = await saveProviderCheck(session.logs.slice(0, 1));
+  const diagnostic = JSON.parse(await readFile(path.join(temporary, "data", "provider-checks", `${diagnosticId}.json`), "utf8"));
+  assert.equal(diagnostic.logs.length, 1);
+  assert.ok(!(await listSessions()).some(item => item.id === diagnosticId));
   await transition(restored, { action: "revision", request: "Add an optional phone number to members" }); await saveSession(restored);
   assert.ok(!(await readdir(path.join(temporary, "outputs", session.id))).includes("schema.sql"));
   assert.ok(!validId("../../secrets"));

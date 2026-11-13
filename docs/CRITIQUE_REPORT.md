@@ -1,5 +1,7 @@
 # Database-design critique and workflow fixes
 
+For the subsequent real-model output review and additional root-cause fixes (including SQLite length enforcement, revision consistency, and date/uniqueness corrections), see `SPRINT_2.md`.
+
 This report records real issues found while reviewing the implementation and illustrative design. It distinguishes defects fixed in the workflow from remaining domain/deployment responsibilities.
 
 ## 1. Optional relationships were not exercised by the initial seed

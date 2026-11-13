@@ -1,10 +1,10 @@
 # Prompt / PDF compliance matrix
 
-Reference: the eight-page `dba_agent_project.pdf` supplied in `D:\project2`. The separate test-scenario file mentioned by that PDF was absent. This is an engineering acceptance audit, not a guarantee of a grade or semantic perfection from every possible model.
+Reference: the eight-page `dba_agent_project.pdf` supplied locally outside this repository. The separate test-scenario file mentioned by that PDF was absent. This original matrix describes the first offline sprint; see `SPRINT_2.md` for current public-repository status, real-provider testing, selectable agents, and later fixes. This is not a guarantee of a grade or semantic perfection from every possible model.
 
 | Requirement | Implementation / evidence | Result |
 | --- | --- | --- |
-| Website on localhost now; do not deploy/push | Next.js binds 127.0.0.1:3000; no remote or deployment configured | Implemented |
+| Website on localhost; no hosting deployment | Next.js binds 127.0.0.1:3000; user subsequently requested a public GitHub repository, now published | Implemented; hosting not deployed |
 | Full project in requested code directory | Existing `project_code/` used; `project_cde` treated as a spelling inconsistency | Implemented |
 | Log steps/knowledge outside code directory | `../PROJECT_LOG.md`, with milestones, findings, tests, limits | Implemented |
 | Client sees every stage output | Six-stage workspace, output panels, preview/source, manual continue, artifact and map tabs | Implemented / browser-tested |
@@ -33,7 +33,7 @@ Reference: the eight-page `dba_agent_project.pdf` supplied in `D:\project2`. The
 | Prompt files outside source | Eight readable Markdown files in prompts/ | Implemented |
 | Every LLM call logged | Stage/input/output/provider/model/attempt/error/duration; secret redaction | Implemented / retry/redaction tested |
 | Organized output folder | outputs/<uuid>/ plus complete ZIP; current session and call traces included | Implemented / disk + ZIP tested |
-| Git repository and README | Local git init; full setup/configuration/usage/example/test instructions | Implemented; intentionally no commit or push |
+| Git repository and README | Public GitHub repository, setup/configuration/usage/example/test instructions | Published at user's later request |
 | Complete example for supplied scenario | Complete illustrative examples/lumina/ run instead | Blocked for exact scenario: scenario.md not supplied |
 | Short architecture report | docs/ARCHITECTURE_REPORT.md | Delivered |
 | Critique report / ≥3 actual findings | docs/CRITIQUE_REPORT.md, six reviewed concerns including concrete code/design fixes | Delivered |

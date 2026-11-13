@@ -1,0 +1,278 @@
+{
+  "name": "Equipment Lending Club Database",
+  "overview": "A single-user offline SQLite database for a small equipment-lending club. It tracks members with unique email and optional phone, items with unique asset tags, and loans with borrow/return dates. The schema enforces unique constraints, RESTRICT deletion on referenced members/items, and a CHECK constraint that returned_on is not before borrowed_on. The application ensures at most one open loan per item within a transaction. Security relies on OS file permissions and regular backups.",
+  "tables": [
+    {
+      "name": "members",
+      "purpose": "Club members with unique email and optional phone",
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "description": "Unique member identifier assigned by the application"
+        },
+        {
+          "name": "full_name",
+          "type": "text",
+          "nullable": false,
+          "description": "Full name of the member"
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "length": 255,
+          "nullable": false,
+          "description": "Unique email address, private contact data; uniqueness enforced by the database, format validated by the application"
+        },
+        {
+          "name": "phone",
+          "type": "string",
+          "length": 30,
+          "nullable": true,
+          "description": "Optional phone number, private contact data"
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "unique": [
+        [
+          "email"
+        ]
+      ],
+      "foreignKeys": [],
+      "checks": [],
+      "indexes": [],
+      "functionalDependencies": [
+        "id -> full_name, email, phone",
+        "email -> id, full_name, phone"
+      ],
+      "normalization": "The table is in 3NF: all non-key attributes depend on the primary key id, and email is a candidate key with no transitive dependencies; phone is also functionally dependent on id.",
+      "rows": [
+        {
+          "id": 1,
+          "full_name": "John Doe",
+          "email": "john.doe@example.org",
+          "phone": "+1-555-0100"
+        },
+        {
+          "id": 2,
+          "full_name": "Jane Smith",
+          "email": "jane.smith@example.org",
+          "phone": null
+        },
+        {
+          "id": 3,
+          "full_name": "Sam Brown",
+          "email": "sam.brown@example.org",
+          "phone": "+1-555-0123"
+        }
+      ]
+    },
+    {
+      "name": "items",
+      "purpose": "Lendable equipment items with unique asset tag",
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "description": "Unique item identifier assigned by the application"
+        },
+        {
+          "name": "asset_tag",
+          "type": "string",
+          "length": 50,
+          "nullable": false,
+          "description": "Unique asset tag identifier"
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "nullable": false,
+          "description": "Human-readable name of the item"
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "unique": [
+        [
+          "asset_tag"
+        ]
+      ],
+      "foreignKeys": [],
+      "checks": [],
+      "indexes": [],
+      "functionalDependencies": [
+        "id -> asset_tag, name",
+        "asset_tag -> id, name"
+      ],
+      "normalization": "In 3NF: all attributes depend on the primary key, and asset_tag is a candidate key with no transitive dependencies.",
+      "rows": [
+        {
+          "id": 1,
+          "asset_tag": "CAM-001",
+          "name": "Canon EOS R5 Camera"
+        },
+        {
+          "id": 2,
+          "asset_tag": "DRN-002",
+          "name": "DJI Mavic 3 Drone"
+        },
+        {
+          "id": 3,
+          "asset_tag": "LAP-003",
+          "name": "MacBook Pro 16-inch"
+        }
+      ]
+    },
+    {
+      "name": "loans",
+      "purpose": "Loan records linking a member and an item with borrow and return dates",
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "description": "Unique loan identifier assigned by the application"
+        },
+        {
+          "name": "member_id",
+          "type": "integer",
+          "nullable": false,
+          "description": "Foreign key to members.id"
+        },
+        {
+          "name": "item_id",
+          "type": "integer",
+          "nullable": false,
+          "description": "Foreign key to items.id"
+        },
+        {
+          "name": "borrowed_on",
+          "type": "date",
+          "nullable": false,
+          "description": "UTC date (YYYY-MM-DD) when the item was borrowed"
+        },
+        {
+          "name": "returned_on",
+          "type": "date",
+          "nullable": true,
+          "description": "UTC date (YYYY-MM-DD) when the item was returned, null if still out"
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "unique": [],
+      "foreignKeys": [
+        {
+          "columns": [
+            "member_id"
+          ],
+          "refTable": "members",
+          "refColumns": [
+            "id"
+          ],
+          "onDelete": "RESTRICT"
+        },
+        {
+          "columns": [
+            "item_id"
+          ],
+          "refTable": "items",
+          "refColumns": [
+            "id"
+          ],
+          "onDelete": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "loans_return_check",
+          "expression": "returned_on IS NULL OR returned_on >= borrowed_on"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "loans_item_returned_idx",
+          "columns": [
+            "item_id",
+            "returned_on"
+          ],
+          "unique": false
+        },
+        {
+          "name": "loans_member_idx",
+          "columns": [
+            "member_id"
+          ],
+          "unique": false
+        }
+      ],
+      "functionalDependencies": [
+        "id -> member_id, item_id, borrowed_on, returned_on"
+      ],
+      "normalization": "In 3NF: all attributes depend on the primary key; no transitive dependencies; foreign keys are required.",
+      "rows": [
+        {
+          "id": 1,
+          "member_id": 1,
+          "item_id": 1,
+          "borrowed_on": "2025-02-01",
+          "returned_on": "2025-02-03"
+        },
+        {
+          "id": 2,
+          "member_id": 2,
+          "item_id": 2,
+          "borrowed_on": "2025-02-05",
+          "returned_on": null
+        },
+        {
+          "id": 3,
+          "member_id": 3,
+          "item_id": 3,
+          "borrowed_on": "2025-02-07",
+          "returned_on": null
+        },
+        {
+          "id": 4,
+          "member_id": 1,
+          "item_id": 2,
+          "borrowed_on": "2025-01-20",
+          "returned_on": "2025-01-22"
+        }
+      ]
+    }
+  ],
+  "assumptions": [
+    "No limit on the number of open loans a member can have simultaneously.",
+    "The application enforces at most one open loan per item inside a transaction; the database does not have a constraint for this rule.",
+    "Email addresses are not format-validated by the database; the database enforces uniqueness, while format validation is an application responsibility.",
+    "Asset tags are unique but not verified to be physically attached to items.",
+    "Backup strategy is not detailed; regular file-based backups are assumed.",
+    "Database file access is controlled entirely by OS permissions; no additional encryption or authentication table is used.",
+    "borrowed_on and returned_on are date-only UTC values stored as YYYY-MM-DD strings (review correction).",
+    "IDs are integers assigned by the application; the database does not use auto-increment.",
+    "Members may have an optional phone number; if provided, it is stored as a string of up to 30 characters."
+  ],
+  "businessRules": [
+    "At most one open loan per item: enforced by the application within a transaction (not by a SQL constraint).",
+    "returned_on must be >= borrowed_on when present: enforced by the SQL CHECK constraint loans_return_check.",
+    "Email must be unique: enforced by the UNIQUE constraint on members.email.",
+    "Asset tag must be unique: enforced by the UNIQUE constraint on items.asset_tag.",
+    "Deletion of a member or item that has existing loans is restricted: enforced by ON DELETE RESTRICT on foreign keys.",
+    "Loan history is retained indefinitely; no cascading deletes.",
+    "All foreign keys (member_id, item_id) are mandatory and must reference existing rows."
+  ],
+  "security": [
+    "The SQLite database file is protected by operating system file permissions (e.g., read/write for the librarian only).",
+    "Regular backups of the database file should be maintained to prevent data loss.",
+    "Emails and phone numbers are private contact data; consider encrypting the database file if required by policy.",
+    "No authentication table; access is via the application which is used solely by the trusted librarian."
+  ],
+  "denormalizations": []
+}

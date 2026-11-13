@@ -1,5 +1,7 @@
 # DBA Agent — short architecture report
 
+Current provider integration and verification are recorded in `SPRINT_2.md`. Workspaces now also persist per-stage provider/model overrides; temporary credentials remain endpoint-scoped and memory-only. The original PDF remains local, outside the public repository.
+
 ## 1. Workflow and state
 
 The application is a Next.js/TypeScript website with a client studio and Node route handlers. A workspace contains its original brief, provider configuration, stage/completion state, question/answer rounds, DBMS decision, canonical design, approval timestamp, versioned artifacts, change history, validation history, and provider-call traces. The six stages execute in the PDF's order. Guards reject skipped stages. The client deliberately stays on a stage after generating its output so a person can inspect it before continuing.

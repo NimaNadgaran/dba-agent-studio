@@ -4,13 +4,15 @@ import { artifact, designFileNames, writeChangelog, writeChoice, writeDesign, wr
 import { demoAnswers, demoBrief, demoChoice, demoDesign, demoFollowups, demoIntake, demoQuestions } from "./demo";
 import { generateSQL, validateDesign } from "./design";
 import { callModel, environmentConfig, recordDemo } from "./provider";
-import { AppError, categories, choiceSchema, designSchema, intakeSchema, interviewSchema, type Design, type ProviderConfig, type Session, type Stage } from "./types";
+import { AppError, categories, choiceSchema, designSchema, intakeSchema, interviewSchema, type AgentConfigs, type ApiKeys, type Design, type ProviderConfig, type Session, type Stage } from "./types";
 import { validateSQL } from "./validation";
 
-export function newSession(description: string, config?: ProviderConfig): Session {
+export function newSession(description: string, config?: ProviderConfig, agentConfigs?: AgentConfigs): Session {
   const provider = config ?? environmentConfig();
+  if (provider.provider === "demo" && agentConfigs && Object.keys(agentConfigs).length) throw new AppError("Offline examples cannot use live agent overrides. Create a live workspace.");
+  if (Object.values(agentConfigs ?? {}).some(agent => agent?.provider === "demo")) throw new AppError("Live agents cannot use the offline fixture.");
   const now = new Date().toISOString();
-  return { id: randomUUID(), title: provider.provider === "demo" ? "Lumina coworking" : "Untitled workspace", description: provider.provider === "demo" ? demoBrief : description, createdAt: now, updatedAt: now, version: 0, stage: 1, completedStages: [], mode: provider.provider === "demo" ? "demo" : "live", config: provider, interview: { rounds: [], pending: [], ready: false, summary: "", rationale: "Awaiting initial intake." }, designVersion: 0, artifacts: {}, changes: [], logs: [], validationHistory: [] };
+  return { id: randomUUID(), title: provider.provider === "demo" ? "Lumina coworking" : "Untitled workspace", description: provider.provider === "demo" ? demoBrief : description, createdAt: now, updatedAt: now, version: 0, stage: 1, completedStages: [], mode: provider.provider === "demo" ? "demo" : "live", config: provider, agentConfigs, interview: { rounds: [], pending: [], ready: false, summary: "", rationale: "Awaiting initial intake." }, designVersion: 0, artifacts: {}, changes: [], logs: [], validationHistory: [] };
 }
 
 function complete(session: Session, stage: Stage, next: Stage) {
@@ -25,21 +27,27 @@ function invalidate(session: Session) {
   session.completedStages = session.completedStages.filter(stage => stage < 5);
   session.stage = 5;
 }
-const context = (session: Session) => ({ brief: session.description, intake: session.intake, interview: session.interview, choice: session.choice });
+const context = (session: Session) => ({ brief: session.description, intake: session.intake, interview: session.interview, choice: session.choice, revisions: session.changes, currentBusinessRules: session.design?.businessRules });
 const revisedSchema = z.object({ design: designSchema, selected: choiceSchema.shape.selected, summary: z.string().min(10), rationale: z.string().min(30), comparison: choiceSchema.shape.comparison });
 function validateChoice(choice: z.infer<typeof choiceSchema>) {
   if (new Set(choice.comparison.map(item => item.dbms)).size !== 4) throw new AppError("DBMS comparison must contain all four distinct options.");
 }
 
-export type WorkflowAction = { action: "intake" | "interview" | "selection" | "design" | "revision" | "approve" | "sql" | "config"; answers?: Record<string, string>; request?: string; config?: ProviderConfig; apiKey?: string };
+export type WorkflowAction = { action: "intake" | "interview" | "selection" | "design" | "revision" | "approve" | "sql" | "config"; answers?: Record<string, string>; request?: string; config?: ProviderConfig; apiKey?: string; apiKeys?: ApiKeys; agentConfigs?: AgentConfigs };
 
 export async function transition(session: Session, action: WorkflowAction): Promise<Session> {
   const demo = session.mode === "demo";
-  const apiKey = action.apiKey;
+  const apiKey = action.apiKeys ?? action.apiKey;
+  if (action.agentConfigs) {
+    if (demo || Object.values(action.agentConfigs).some(config => config?.provider === "demo")) throw new AppError("Agent overrides require a live workspace and live providers.");
+    session.agentConfigs = action.agentConfigs;
+  }
   if (action.action === "config") {
-    if (!action.config) throw new AppError("Missing provider configuration.");
-    if ((action.config.provider === "demo") !== demo) throw new AppError("Create a new workspace to switch between the example and live AI. This preserves provenance.");
-    session.config = action.config;
+    if (!action.config && !action.agentConfigs) throw new AppError("Missing provider configuration.");
+    if (action.config) {
+      if ((action.config.provider === "demo") !== demo) throw new AppError("Create a new workspace to switch between the example and live AI. This preserves provenance.");
+      session.config = action.config;
+    }
   } else if (action.action === "intake") {
     requireState(!session.completedStages.includes(1), "Intake is already complete. Create a new workspace for a different brief.");
     if (session.description.trim().length < 30) throw new AppError("Describe your system in at least 30 characters.");
@@ -107,8 +115,8 @@ export async function transition(session: Session, action: WorkflowAction): Prom
     session.design = revision.design;
     session.choice = { selected: revision.selected, rationale: revision.rationale, comparison: revision.comparison };
     session.designVersion += 1;
-    session.changes.push({ version: session.designVersion, at: new Date().toISOString(), request: action.request, summary: revision.summary, files: ["dbms-choice.md", ...designFileNames, "schema.sql (invalidated)", "seed.sql (invalidated)", "validation.md (invalidated)"] });
-    invalidate(session); writeChoice(session); writeDesign(session);
+    session.changes.push({ version: session.designVersion, at: new Date().toISOString(), request: action.request, summary: revision.summary, files: ["requirements.md", "dbms-choice.md", ...designFileNames, "schema.sql (invalidated)", "seed.sql (invalidated)", "validation.md (invalidated)"] });
+    invalidate(session); writeRequirements(session); writeChoice(session); writeDesign(session);
   } else if (action.action === "approve") {
     requireState(session.design && session.choice && !session.approvedAt, "Generate and review the design before approving it.");
     session.approvedAt = new Date().toISOString();
@@ -137,8 +145,8 @@ export async function transition(session: Session, action: WorkflowAction): Prom
       if (demo || attempt === maxAttempts) break;
       const fixed: Design = await callModel(session, "repair", designSchema, { ...context(session), design: session.design, schema: sql.schema, seed: sql.seed, error: result.error, validationAttempt: attempt }, apiKey, validateDesign);
       session.design = fixed; session.designVersion += 1; repaired = true;
-      session.changes.push({ version: session.designVersion, at: new Date().toISOString(), request: "Automatic execution-validation repair", summary: `Corrected canonical model after ${result.engine} rejected execution: ${result.error}. Approval invalidated; review is required before exporting SQL.`, files: [...designFileNames, "schema.sql (invalidated)", "seed.sql (invalidated)"] });
-      invalidate(session); writeDesign(session);
+      session.changes.push({ version: session.designVersion, at: new Date().toISOString(), request: "Automatic execution-validation repair", summary: `Corrected canonical model after ${result.engine} rejected execution: ${result.error}. Approval invalidated; review is required before exporting SQL.`, files: ["requirements.md", ...designFileNames, "schema.sql (invalidated)", "seed.sql (invalidated)"] });
+      invalidate(session); writeRequirements(session); writeDesign(session);
     }
     if (repaired && !session.completedStages.includes(6)) { session.approvedAt = undefined; session.stage = 5; writeChangelog(session); }
   }

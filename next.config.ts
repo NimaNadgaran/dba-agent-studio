@@ -1,0 +1,17 @@
+import type { NextConfig } from "next";
+
+const config: NextConfig = {
+  serverExternalPackages: ["@electric-sql/pglite", "sql.js"],
+  outputFileTracingIncludes: {
+    "/*": ["./prompts/**/*", "./node_modules/sql.js/dist/sql-wasm.wasm", "./node_modules/@electric-sql/pglite/dist/**/*"],
+  },
+  async headers() {
+    return [{ source: "/(.*)", headers: [
+      { key: "X-Content-Type-Options", value: "nosniff" },
+      { key: "Referrer-Policy", value: "same-origin" },
+      { key: "X-Frame-Options", value: "DENY" },
+    ] }];
+  },
+};
+
+export default config;

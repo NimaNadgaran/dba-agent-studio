@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import JSZip from "jszip";
 import { promises as fs } from "node:fs";
-import { demoAnswers } from "../../src/lib/demo";
+import { demoAnswers, demoChoice, demoDesign } from "../../src/lib/demo";
 import { createServer } from "node:http";
 import { categories } from "../../src/lib/types";
 
@@ -27,8 +27,8 @@ test("desktop guided example completes all six stages, renders diagrams and expo
   await expect(page.locator(".interview-round")).toContainText("Round 2");
   await page.getByRole("button", { name: "Fill example answers" }).click();
   await page.getByRole("button", { name: "Review follow-up answers" }).click();
-  await expect(page.getByRole("heading", { name: "A clearer picture. A stronger foundation." })).toBeVisible();
-  await page.getByRole("button", { name: "Find the right DBMS" }).click();
+  await expect(page.locator(".stage-heading h2")).toHaveText("DBMS selection");
+  await expect(page.getByRole("button", { name: "Compare & select a DBMS" })).toBeVisible();
   await page.getByRole("button", { name: "Compare & select a DBMS" }).click();
   await expect(page.locator(".selected-engine")).toContainText("PostgreSQL");
   await page.getByRole("button", { name: "Build the design", exact: true }).click();
@@ -134,7 +134,7 @@ test("production API executes PostgreSQL and honestly reports MySQL and SQL Serv
   }
 });
 
-test("live provider picker discovers models, tests JSON, routes stage agents and never persists keys", async ({ page, request }) => {
+test("live provider picker discovers models, tests JSON, uses shared workspace configuration and never persists keys", async ({ page, request }) => {
   const calls: { model?: string; authorization?: string }[] = [];
   const server = createServer(async (incoming, outgoing) => {
     outgoing.setHeader("content-type", "application/json");
@@ -142,7 +142,14 @@ test("live provider picker discovers models, tests JSON, routes stage agents and
     let text = ""; for await (const chunk of incoming) text += chunk;
     const body = JSON.parse(text);
     calls.push({ model: body.model, authorization: incoming.headers.authorization });
-    const result = body.messages[0].content.includes("# Provider connection check") ? { ok: true } : body.model === "mock-intake" ? {
+    const input = JSON.parse(body.messages[1].content).data;
+    const result = body.messages[0].content.includes("# Provider connection check") ? { ok: true } : input.choice ? demoDesign() : input.interview?.ready && !input.phase ? demoChoice : input.phase === "autofill" ? {
+      answers: input.questions.map((question: { id: string }) => ({ id: question.id, answer: "Assumption for review: use conservative staff-only access, preserve referenced records, and confirm any unknown business limits." })),
+    } : input.phase === "evaluate" ? input.rounds.length >= 2 ? {
+      ready: true, questions: [], rationale: "The initial requirements and targeted follow-up have been reviewed.", summary: "Staff record rescued animals and care observations. Use mandatory identifiers and foreign keys, restrict deletion of referenced history, use staff-only access, and document conservative assumptions for unconfirmed volume and retention.",
+    } : {
+      ready: false, rationale: "Confirm whether animal care history must be retained when staff leave the centre.", summary: "Staff record animals and observations.", questions: [{ id: "retention_followup", category: "Business rules", question: "Should care history remain when a staff member leaves?", hint: "Confirm retention and deletion behaviour." }],
+    } : !input.phase ? {
       title: "Wildlife register", summary: "An independent wildlife centre records rescued animals and their care observations.", actors: ["Care staff"], entities: ["Animals", "Care observations"], processes: ["Admit an animal"], risks: ["Confirm retention rules"],
     } : { ready: false, rationale: "Clarify all seven categories before designing the wildlife register.", summary: "", questions: categories.map((category, index) => ({ id: `question_${index}`, category, question: `What does this wildlife centre need for ${category}?`, hint: "Describe the animal care process." })) };
     outgoing.end(JSON.stringify({ model: body.model, choices: [{ finish_reason: "stop", message: { content: JSON.stringify(result) } }] }));
@@ -163,35 +170,98 @@ test("live provider picker discovers models, tests JSON, routes stage agents and
     await expect(defaults.getByLabel("Model identifier", { exact: true })).toHaveValue("kilo-auto/free");
     await defaults.getByLabel("Provider", { exact: true }).selectOption("custom");
     await defaults.getByLabel("API base URL", { exact: true }).fill(baseUrl);
+    await defaults.getByLabel("Temporary API key", { exact: false }).fill(`  Bearer "${secret}"  `);
+    await expect(defaults.getByText("Using the temporary key", { exact: false })).toBeVisible();
+    await defaults.getByRole("button", { name: "Clear temporary key", exact: true }).click();
+    await expect(defaults.getByLabel("Temporary API key", { exact: false })).toHaveValue("");
     await defaults.getByLabel("Temporary API key", { exact: false }).fill(secret);
     await defaults.getByRole("button", { name: "Load models", exact: true }).click();
     await defaults.getByLabel("Available models", { exact: true }).selectOption("mock-intake");
     await defaults.getByRole("button", { name: "Test connection", exact: true }).click();
     await expect(defaults.getByRole("status")).toContainText("Connection and JSON response verified");
-    const assignment = page.locator(".agent-assignment");
-    await assignment.getByLabel("Workflow agent", { exact: true }).selectOption("interview");
-    await assignment.getByLabel("Use workspace default for this agent", { exact: true }).uncheck();
-    await assignment.getByLabel("Model identifier", { exact: true }).fill("mock-interview");
+    await expect(page.getByRole("heading", { name: "Provider & model per stage" })).toHaveCount(0);
     await page.getByRole("button", { name: "Save configuration", exact: true }).click();
     await page.getByRole("button", { name: "Overview", exact: true }).click();
     await page.getByRole("button", { name: "New design", exact: true }).click();
     await page.getByLabel("Tell us about your system", { exact: true }).fill("Design an independent wildlife register with rescued animals and care records for rehabilitation staff.");
     await page.getByRole("button", { name: "Create design workspace", exact: true }).click();
+    await expect(page).toHaveURL(/\?workspace=/);
+    const workspaceId = new URL(page.url()).searchParams.get("workspace")!;
+    const existing = (await (await request.get(`/api/sessions/${workspaceId}`)).json()).session;
+    const legacy = await request.post(`/api/sessions/${workspaceId}`, { data: { action: "config", version: existing.version, agentConfigs: { interview: { provider: "compatible", baseUrl: "https://unused-provider.example.org/v1", model: "legacy-model" } } } });
+    expect(legacy.ok()).toBeTruthy();
+    await page.reload();
+    const workspacePicker = page.locator(".stage-aside .provider-picker");
+    await workspacePicker.getByLabel("Temporary API key", { exact: false }).fill(`  Bearer "${secret}"  `);
+    await workspacePicker.getByLabel("Model identifier", { exact: true }).fill("mock-interview");
     await page.getByRole("button", { name: "Understand my system", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Here’s what we understood", exact: true })).toBeVisible();
-    expect(calls.slice(-2).map(call => call.model)).toEqual(["mock-intake", "mock-interview"]);
+    expect(calls.slice(-2).map(call => call.model)).toEqual(["mock-interview", "mock-interview"]);
     expect(calls.every(call => call.authorization === `Bearer ${secret}`)).toBeTruthy();
     const id = new URL(page.url()).searchParams.get("workspace")!;
     const saved = (await (await request.get(`/api/sessions/${id}`)).json()).session;
-    expect(saved.agentConfigs.interview.model).toBe("mock-interview");
+    expect(saved.agentConfigs).toEqual({});
+    expect(saved.config.model).toBe("mock-interview");
+    await expect(page.locator(".stage-aside > section").first()).toHaveClass(/output-panel/);
+    await expect(page.locator(".stage-aside").getByRole("heading", { name: "Agent configuration" })).toBeVisible();
     expect(JSON.stringify(saved)).not.toContain(secret);
     expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(secret);
     expect(await page.evaluate(() => JSON.stringify(sessionStorage))).not.toContain(secret);
     await page.getByRole("button", { name: "Continue to the interview", exact: true }).click();
     await expect(page.locator(".question textarea")).toHaveCount(7);
+    const manualAnswer = "Care staff record animals, admissions, and observations. Preserve this answer.";
+    await page.locator(".question textarea").first().fill(manualAnswer);
+    await expect(page.locator(".stage-heading-actions .chip")).toHaveText("In progress");
+    await page.getByRole("button", { name: "Fill automatically", exact: true }).click();
+    await expect(page.locator(".question textarea").nth(1)).toHaveValue(/Assumption for review/);
+    await expect(page.locator(".question textarea").first()).toHaveValue(manualAnswer);
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+    const statusBox = await page.locator(".stage-heading-actions .chip").boundingBox();
+    const fillBox = await page.getByRole("button", { name: "Fill automatically", exact: true }).boundingBox();
+    expect(fillBox!.y).toBeGreaterThanOrEqual(statusBox!.y + statusBox!.height);
+    await page.screenshot({ path: "test-results/screenshots/07-interview-autofill-mobile.png", fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1080 });
+    const failInterview = async (route: import("@playwright/test").Route) => {
+      if (route.request().method() === "POST" && route.request().postDataJSON().action === "interview") {
+        await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "Synthetic temporary provider failure" }) });
+        await page.unroute(`**/api/sessions/${id}`, failInterview);
+      } else await route.continue();
+    };
+    await page.route(`**/api/sessions/${id}`, failInterview);
+    await page.getByRole("button", { name: "Review my answers", exact: true }).click();
+    await expect(page.locator(".stage-panel [role=alert]")).toContainText("Your answers are kept");
+    await expect(page.locator(".question textarea").first()).toHaveValue(manualAnswer);
+    await page.getByRole("button", { name: "Review my answers", exact: true }).click();
+    await expect(page.locator(".question textarea")).toHaveCount(1);
+    await expect(page.locator(".stage-panel")).toContainText("More detail is needed before stage 3");
+    await page.getByRole("button", { name: "Fill automatically", exact: true }).click();
+    await expect(page.locator(".question textarea")).toHaveValue(/Assumption for review/);
     await page.screenshot({ path: "test-results/screenshots/06-live-agent-picker.png", fullPage: true });
+    await page.getByRole("button", { name: "Review follow-up answers", exact: true }).click();
+    await expect(page.locator(".stage-heading h2")).toHaveText("DBMS selection");
+    const completed = (await (await request.get(`/api/sessions/${id}`)).json()).session;
+    expect(completed.interview.rounds).toHaveLength(2); expect(completed.stage).toBe(3);
+    expect(JSON.stringify(completed)).not.toContain(secret);
+    await page.getByRole("button", { name: "Compare & select a DBMS", exact: true }).click();
+    await page.getByRole("button", { name: "Build the design", exact: true }).click();
+    const failDesign = async (route: import("@playwright/test").Route) => {
+      if (route.request().method() === "POST" && route.request().postDataJSON().action === "design") {
+        await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "Synthetic design generation failure" }) });
+        await page.unroute(`**/api/sessions/${id}`, failDesign);
+      } else await route.continue();
+    };
+    await page.route(`**/api/sessions/${id}`, failDesign);
+    await page.getByRole("button", { name: "Generate a complete design", exact: true }).click();
+    await expect(page.locator(".stage-panel [role=alert]")).toContainText("Your saved requirements are unchanged");
+    await page.getByRole("button", { name: "Generate a complete design", exact: true }).click();
+    await expect(page.locator(".table-inventory>div")).toHaveCount(8);
+    await expect(page.locator(".stage-panel [role=alert]")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Review & refine the design", exact: true })).toBeVisible();
+    const designed = (await (await request.get(`/api/sessions/${id}`)).json()).session;
+    expect(designed.completedStages).toContain(4); expect(designed.stage).toBe(5);
+    for (const name of ["conceptual-model.md", "logical-schema.md", "normalization.md", "assumptions.md"]) expect(designed.artifacts[name]).toBeTruthy();
     await page.reload();
-    await page.locator(".stage-aside").getByLabel("Workflow agent", { exact: true }).selectOption("interview");
     await expect(page.locator(".stage-aside").getByLabel("Model identifier", { exact: true })).toHaveValue("mock-interview");
     await expect(page.locator(".stage-aside").getByLabel("Temporary API key", { exact: false })).toHaveValue("");
     await page.setViewportSize({ width: 390, height: 844 });
@@ -208,4 +278,41 @@ test("provider API rejects unsupported actions and missing keys without claiming
   expect(invalid.status()).toBe(400);
   const origin = await request.post("/api/providers", { headers: { origin: "https://evil.example.org" }, data: { action: "models", config } });
   expect(origin.status()).toBe(403);
+});
+
+
+test("notifications persist, keep only the latest three, and dismiss individually", async ({ page }) => {
+  let failures = 0;
+  await page.route("**/api/sessions", async route => {
+    if (route.request().method() === "POST") {
+      failures += 1;
+      await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: `Synthetic notification ${failures}` }) });
+    } else await route.continue();
+  });
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: /Good ideas deserve/ })).toBeVisible();
+  await page.clock.install();
+  await page.getByRole("button", { name: "New design", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Explore an example", exact: true }).click();
+  for (let message = 1; message <= 4; message++) {
+    await page.getByRole("button", { name: "Open the guided example", exact: true }).click();
+    await expect(page.locator(".toast-stack .toast").last()).toContainText(`Synthetic notification ${message}`);
+  }
+  await page.getByRole("button", { name: "Close new workspace", exact: true }).click();
+  const messages = page.locator(".toast-stack .toast");
+  await expect(messages).toHaveCount(3);
+  await expect(messages.nth(0)).toContainText("Synthetic notification 2");
+  await expect(messages.nth(1)).toContainText("Synthetic notification 3");
+  await expect(messages.nth(2)).toContainText("Synthetic notification 4");
+  await page.clock.fastForward(15000);
+  await expect(messages).toHaveCount(3);
+  await messages.nth(1).getByRole("button", { name: "Dismiss message", exact: true }).click();
+  await expect(messages).toHaveCount(2);
+  await expect(messages.nth(0)).toContainText("Synthetic notification 2");
+  await expect(messages.nth(1)).toContainText("Synthetic notification 4");
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+  await messages.first().getByRole("button", { name: "Dismiss message", exact: true }).click();
+  await messages.first().getByRole("button", { name: "Dismiss message", exact: true }).click();
+  await expect(page.locator(".toast-stack")).toHaveCount(0);
 });

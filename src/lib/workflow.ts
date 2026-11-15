@@ -35,6 +35,23 @@ function validateChoice(choice: z.infer<typeof choiceSchema>) {
 
 export type WorkflowAction = { action: "intake" | "interview" | "selection" | "design" | "revision" | "approve" | "sql" | "config"; answers?: Record<string, string>; request?: string; config?: ProviderConfig; apiKey?: string; apiKeys?: ApiKeys; agentConfigs?: AgentConfigs };
 
+export async function draftInterviewAnswers(session: Session, existing: Record<string, string> = {}, apiKeys?: string | ApiKeys): Promise<Record<string, string>> {
+  requireState(session.completedStages.includes(1) && !session.interview.ready && session.interview.pending.length, "Complete intake first; automatic answers are only available during an unfinished interview.");
+  const questions = session.interview.pending.filter(question => !existing[question.id]?.trim());
+  const answers = Object.fromEntries(session.interview.pending.filter(question => existing[question.id]?.trim()).map(question => [question.id, existing[question.id]]));
+  if (!questions.length) return answers;
+  if (session.mode === "demo") {
+    for (const question of questions) answers[question.id] = demoAnswers[question.id] || "Assumption for review: use the simplest approach consistent with the example brief.";
+    recordDemo(session, "interview", { phase: "autofill", questions, existingAnswers: existing }, { answers });
+    return answers;
+  }
+  const result = await callModel(session, "interview", z.object({ answers: z.array(z.object({ id: z.string().min(1).max(60), answer: z.string().trim().min(2).max(12000) })).min(1).max(14) }), { ...context(session), phase: "autofill", questions, existingAnswers: answers }, apiKeys, draft => {
+    if (draft.answers.length !== questions.length || new Set(draft.answers.map(answer => answer.id)).size !== questions.length || draft.answers.some(answer => !questions.some(question => question.id === answer.id))) throw new AppError("Automatic answers must match each unanswered question exactly once.");
+  });
+  for (const answer of result.answers) answers[answer.id] = answer.answer;
+  return answers;
+}
+
 export async function transition(session: Session, action: WorkflowAction): Promise<Session> {
   const demo = session.mode === "demo";
   const apiKey = action.apiKeys ?? action.apiKey;

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { demoAnswers, newSession, transition } from "../src/lib/workflow";
+import { demoAnswers, draftInterviewAnswers, newSession, transition } from "../src/lib/workflow";
 import { listSessions, readSession, saveProviderCheck, saveSession, validId, withSessionLock } from "../src/lib/store";
 import type { Session } from "../src/lib/types";
 
@@ -95,4 +95,22 @@ test("per-session operations serialize without leaking locks", async () => {
     withSessionLock("test", async () => { seen.push("second:start"); seen.push("second:end"); }),
   ]);
   assert.deepEqual(seen, ["first:start", "first:end", "second:start", "second:end"]);
+});
+
+
+test("offline automatic answers preserve edits and cannot submit or skip interview rounds", async () => {
+  const session = newSession("", demoConfig);
+  await assert.rejects(() => draftInterviewAnswers(session), /Complete intake first/);
+  await transition(session, { action: "intake" });
+  const question = session.interview.pending[0];
+  const answers = await draftInterviewAnswers(session, { [question.id]: "My manually reviewed answer." });
+  assert.equal(answers[question.id], "My manually reviewed answer.");
+  assert.equal(Object.keys(answers).length, 7); assert.equal(session.interview.rounds.length, 0);
+  assert.equal(session.stage, 2); assert.equal(session.interview.ready, false);
+  await transition(session, { action: "interview", answers });
+  assert.equal(session.interview.ready, false); assert.equal(session.interview.pending.length, 2);
+  const followups = await draftInterviewAnswers(session);
+  await transition(session, { action: "interview", answers: followups });
+  assert.equal(session.stage, 3); assert.equal(session.interview.ready, true);
+  await assert.rejects(() => draftInterviewAnswers(session), /unfinished interview/);
 });

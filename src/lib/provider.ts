@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { AppError, type ApiKeys, type ProviderConfig, type Session } from "./types";
-import { credentialScope, isFreeModel, matchingPreset, presetConfig } from "./provider-catalog";
+import { normalizeApiKey, credentialScope, isFreeModel, matchingPreset, presetConfig } from "./provider-catalog";
 
 export function environmentConfig(): ProviderConfig {
   const provider = process.env.LLM_PROVIDER === "demo" ? "demo" : process.env.LLM_PROVIDER === "ollama" ? "ollama" : "compatible";
@@ -23,13 +23,42 @@ export function endpoint(config: ProviderConfig, resource = "chat/completions"):
   return `${url.toString().replace(/\/$/, "")}/${resource}`;
 }
 
-export function providerSecret(config: ProviderConfig, apiKeys?: string | ApiKeys): string {
-  const temporary = typeof apiKeys === "string" ? apiKeys : apiKeys?.[credentialScope(config)];
-  if (temporary) return temporary;
+export function providerCredential(config: ProviderConfig, apiKeys?: string | ApiKeys): { secret: string; source: string } {
+  const temporary = normalizeApiKey((typeof apiKeys === "string" ? apiKeys : apiKeys?.[credentialScope(config)]) || "");
+  if (temporary) return { secret: temporary, source: "temporary key (overrides server keys)" };
   const preset = matchingPreset(config);
-  if (preset && process.env[preset.keyEnv]) return process.env[preset.keyEnv]!;
+  const presetSecret = preset ? normalizeApiKey(process.env[preset.keyEnv] || "") : "";
+  if (presetSecret) return { secret: presetSecret, source: "server " + preset!.keyEnv };
   const environment = environmentConfig();
-  return process.env.LLM_BASE_URL && environment.provider === config.provider && credentialScope(environment) === credentialScope(config) ? process.env.LLM_API_KEY || "" : "";
+  const secret = process.env.LLM_BASE_URL && environment.provider === config.provider && credentialScope(environment) === credentialScope(config) ? normalizeApiKey(process.env.LLM_API_KEY || "") : "";
+  return { secret, source: secret ? "server LLM_API_KEY" : "no key" };
+}
+
+export function providerSecret(config: ProviderConfig, apiKeys?: string | ApiKeys): string {
+  return providerCredential(config, apiKeys).secret;
+}
+
+class ProviderHttpError extends AppError {
+  constructor(message: string, public retryable: boolean) { super(message, 502); }
+}
+
+function providerHttpError(config: ProviderConfig, apiKeys: string | ApiKeys | undefined, status: number, body: string): ProviderHttpError {
+  let detail = body.slice(0, 1000);
+  let code = "";
+  try {
+    const payload = JSON.parse(body);
+    if (typeof payload.error?.message === "string") detail = payload.error.message.slice(0, 1000);
+    if (typeof payload.error?.code === "string") code = payload.error.code;
+  } catch {}
+  const quota = /insufficient_(?:user_)?quota|quota_exceeded|credit_balance_too_low/i.test(code) || /insufficient.*(?:quota|credit|balance)/i.test(detail);
+  const advice = quota
+    ? "The provider reports insufficient account/key credit or quota, not necessarily a request-rate limit. Check billing and key restrictions on that provider, or select a different provider endpoint with its matching key."
+    : status === 401 || status === 403 ? "Check this endpoint's API key and its model permissions." : "Check the provider response and selected model.";
+  const message = "Provider returned HTTP " + status + (code ? " (" + code + ")" : "") + ": " + detail + ". " + advice + " Endpoint: " + credentialScope(config) + ". Model: " + (config.model || "not selected") + ". Credential: " + providerCredential(config, apiKeys).source + ".";
+  const secrets = typeof apiKeys === "string" ? [apiKeys] : Object.values(apiKeys || {});
+  secrets.push(providerSecret(config, apiKeys));
+  const redacted = secrets.flatMap(secret => [secret, normalizeApiKey(secret)]).filter(Boolean).reduce((text, secret) => text.replaceAll(secret, "[REDACTED]"), message);
+  return new ProviderHttpError(redacted, !quota && (status >= 500 || [408, 409, 425, 429].includes(status)));
 }
 
 export function providerReady(config: ProviderConfig, apiKeys?: string | ApiKeys, requireModel = true) {
@@ -63,7 +92,7 @@ export async function listProviderModels(config: ProviderConfig, apiKeys?: strin
   providerReady(config, apiKeys, false);
   const secret = providerSecret(config, apiKeys);
   const response = await fetch(endpoint(config, "models"), { redirect: "error", headers: secret ? { Authorization: `Bearer ${secret}` } : {}, signal: AbortSignal.timeout(20000), cache: "no-store" });
-  if (!response.ok) throw new AppError(`Could not load models (HTTP ${response.status}). Check your endpoint, key and provider availability.`, 502);
+  if (!response.ok) throw providerHttpError(config, apiKeys, response.status, await boundedText(response));
   const payload = JSON.parse(await boundedText(response));
   if (!Array.isArray(payload.data)) throw new AppError("The provider returned an invalid model list. Enter an exact model ID or check its API compatibility.", 502);
   const preset = matchingPreset(config);
@@ -83,9 +112,17 @@ export async function callModel<T>(session: Session, stage: string, schema: z.Zo
   const secrets = [secret, ...(typeof apiKey === "object" ? Object.values(apiKey) : [])].filter(Boolean);
   const redact = (value: string) => secrets.reduce((text, key) => text.replaceAll(key, "[REDACTED]"), value);
   const maxAttempts = Math.max(1, Math.min(4, Number(process.env.LLM_MAX_ATTEMPTS) || 3));
-  const timeoutMs = Math.max(5000, Math.min(180000, Number(process.env.LLM_TIMEOUT_MS) || 90000));
+  const largeOutput = ["design", "revision", "repair"].includes(stage);
+  const outputLimit = Math.max(1024, Math.min(65536, Math.floor(Number(process.env.LLM_DESIGN_MAX_TOKENS) || 32768)));
+  let outputTokens = Math.min(8192, outputLimit);
+  const timeoutMs = Math.max(5000, Math.min(180000, Number(process.env.LLM_TIMEOUT_MS) || (largeOutput ? 180000 : 90000)));
+  const deadline = Date.now() + 270000;
+  let attempts = 0;
   let lastError = "";
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const requestTimeout = Math.min(timeoutMs, deadline - Date.now());
+    if (requestTimeout < 1000) { lastError = "The provider request exceeded the overall time budget. Try a faster model or reduce the design scope."; break; }
+    attempts = attempt;
     const started = Date.now();
     const user = JSON.stringify({ data: input, ...(lastError ? { correctionRequired: lastError } : {}) });
     const messages = [{ role: "system", content: `${common}\n\n${prompt}\n\n${contract}\n\n${selectionContract}` }, { role: "user", content: user }];
@@ -93,15 +130,19 @@ export async function callModel<T>(session: Session, stage: string, schema: z.Zo
     try {
       const response = await fetch(endpoint(config), {
         method: "POST", redirect: "error", headers: { "Content-Type": "application/json", ...(secret ? { Authorization: `Bearer ${secret}` } : {}) },
-        body: JSON.stringify({ model: config.model, messages, response_format: { type: "json_object" } }),
-        signal: AbortSignal.timeout(timeoutMs),
+        body: JSON.stringify({ model: config.model, messages, response_format: { type: "json_object" }, ...(largeOutput ? { max_tokens: outputTokens } : {}) }),
+        signal: AbortSignal.timeout(requestTimeout),
       });
       const body = await boundedText(response);
-      if (!response.ok) throw new Error(`Provider returned HTTP ${response.status}: ${body.slice(0, 1000)}`);
+      if (!response.ok) throw providerHttpError(config, apiKey, response.status, body);
       const payload = JSON.parse(body);
       output = payload.choices?.[0]?.message?.content ?? "";
+      if (payload.choices?.[0]?.finish_reason === "length") {
+        const requestedTokens = outputTokens;
+        if (largeOutput) outputTokens = Math.min(outputLimit, outputTokens * 2);
+        throw new Error(largeOutput ? `The provider truncated the design at the requested ${requestedTokens}-token budget (the provider may enforce a lower limit). Return compact JSON without reasoning or repeated prose. If retries still truncate, choose a model with more output capacity or adjust LLM_DESIGN_MAX_TOKENS (current ceiling ${outputLimit}).` : "The model output was truncated. Use a model with sufficient output capacity or reduce scope.");
+      }
       if (!output) throw new Error("Provider returned no text content.");
-      if (payload.choices?.[0]?.finish_reason === "length") throw new Error("The model output was truncated. Use a model with sufficient output capacity or reduce scope.");
       const parsed = schema.parse(JSON.parse(output.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "")));
       validate?.(parsed);
       session.logs.push({ id: randomUUID(), at: new Date().toISOString(), stage, provider: matchingPreset(config)?.id || config.provider, model: config.model, baseUrl: config.baseUrl, resolvedModel: typeof payload.model === "string" ? payload.model : undefined, attempt, durationMs: Date.now() - started, status: "success", input: redact(JSON.stringify(messages)), output: redact(output) });
@@ -109,10 +150,11 @@ export async function callModel<T>(session: Session, stage: string, schema: z.Zo
     } catch (error) {
       lastError = redact(error instanceof Error ? error.message : String(error));
       session.logs.push({ id: randomUUID(), at: new Date().toISOString(), stage, provider: matchingPreset(config)?.id || config.provider, model: config.model, baseUrl: config.baseUrl, attempt, durationMs: Date.now() - started, status: "error", input: redact(JSON.stringify(messages)), output: redact(output), error: lastError });
+      if (error instanceof ProviderHttpError && !error.retryable) throw new AppError(`The ${stage} stage stopped after ${attempt} attempt${attempt === 1 ? "" : "s"}. ${lastError}`, error.status);
       if (attempt < maxAttempts) await new Promise(resolve => setTimeout(resolve, attempt * 350));
     }
   }
-  throw new AppError(`The ${stage} stage could not complete after ${maxAttempts} attempts. ${lastError}`, 502);
+  throw new AppError(`The ${stage} stage could not complete after ${attempts} attempts. ${lastError}`, 502);
 }
 
 export function recordDemo(session: Session, stage: string, input: unknown, output: unknown) {

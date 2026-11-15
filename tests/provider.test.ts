@@ -3,9 +3,9 @@ import { createServer, type Server } from "node:http";
 import { test } from "node:test";
 import { z } from "zod";
 import { callModel, environmentConfig, listProviderModels, providerReady, providerSecret } from "../src/lib/provider";
-import { credentialScope, presetConfig } from "../src/lib/provider-catalog";
+import { normalizeApiKey, credentialScope, presetConfig } from "../src/lib/provider-catalog";
 import { agentConfigsSchema } from "../src/lib/types";
-import { demoAnswers, newSession, transition } from "../src/lib/workflow";
+import { demoAnswers, draftInterviewAnswers, newSession, transition } from "../src/lib/workflow";
 import { demoChoice, demoDesign } from "../src/lib/demo";
 import type { Session } from "../src/lib/types";
 
@@ -16,8 +16,14 @@ async function mockProvider(responses: (string | object)[]) {
     for await (const chunk of request) text += chunk;
     calls.push({ authorization: request.headers.authorization, body: text ? JSON.parse(text) : {} });
     const value = responses.shift();
+    if (value && typeof value === "object" && "mockStatus" in value) {
+      response.writeHead(Number(value.mockStatus), { "content-type": "application/json" });
+      response.end(JSON.stringify("mockBody" in value ? value.mockBody : {}));
+      return;
+    }
     response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify(request.method === "GET" ? value : { model: "resolved-mock-model", choices: [{ finish_reason: "stop", message: { content: typeof value === "string" ? value : JSON.stringify(value) } }] }));
+    const completion = value && typeof value === "object" && "mockFinishReason" in value ? { finish_reason: value.mockFinishReason, message: { content: JSON.stringify("mockContent" in value ? value.mockContent : {}) } } : { finish_reason: "stop", message: { content: typeof value === "string" ? value : JSON.stringify(value) } };
+    response.end(JSON.stringify(request.method === "GET" ? value : { model: "resolved-mock-model", choices: [completion] }));
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -35,6 +41,66 @@ test("live adapter retries malformed JSON, logs all attempts, and redacts secret
     assert.ok(!JSON.stringify(session.logs).includes("mock-private-key"));
     assert.equal(provider.calls[0].authorization, "Bearer mock-private-key");
     assert.ok(JSON.stringify(provider.calls[1].body).includes("correctionRequired"));
+  } finally { await provider.close(); }
+});
+
+test("quota and authentication failures stop immediately, identify the credential source, and redact keys", async () => {
+  for (const status of [401, 403, 429]) {
+    const secret = "synthetic-quota-key";
+    const provider = await mockProvider([{ mockStatus: status, mockBody: { error: { code: status === 401 ? "invalid_api_key" : "insufficient_user_quota", message: status === 401 ? "Invalid API key " + secret : "Rejected " + secret + ": insufficient user quota" } } }]);
+    try {
+      const session = newSession("Design a wildlife register for rehabilitation staff.", { provider: "compatible", model: "quota-model", baseUrl: provider.url });
+      await assert.rejects(() => callModel(session, "design", z.object({ ok: z.boolean() }), {}, secret), error => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /stopped after 1 attempt/);
+        assert.ok(error.message.includes(provider.url));
+        assert.match(error.message, /Credential: temporary key/);
+        assert.ok(!error.message.includes(secret));
+        return true;
+      });
+      assert.equal(provider.calls.length, 1);
+      assert.equal(session.logs.length, 1);
+      assert.ok(!JSON.stringify(session.logs).includes(secret));
+    } finally { await provider.close(); }
+  }
+});
+
+test("temporary upstream failures and rate limits remain retryable", async () => {
+  for (const status of [429, 503]) {
+    const provider = await mockProvider([{ mockStatus: status, mockBody: { error: { code: "temporarily_unavailable", message: "Try again shortly" } } }, { ok: true }]);
+    try {
+      const session = newSession("Design a wildlife register for rehabilitation staff.", { provider: "compatible", model: "mock", baseUrl: provider.url });
+      assert.deepEqual(await callModel(session, "connection", z.object({ ok: z.boolean() }), {}, "synthetic-key"), { ok: true });
+      assert.equal(provider.calls.length, 2);
+    } finally { await provider.close(); }
+  }
+});
+
+test("switching the workspace endpoint uses its matching key after a quota rejection", async () => {
+  const first = await mockProvider([{ mockStatus: 403, mockBody: { error: { code: "insufficient_user_quota", message: "Insufficient quota" } } }]);
+  const second = await mockProvider([{ ok: true }]);
+  try {
+    const session = newSession("Design a wildlife register for rehabilitation staff.", { provider: "compatible", model: "first", baseUrl: first.url });
+    const keys = { [first.url]: "first-private-key", [second.url]: "second-private-key" };
+    await assert.rejects(() => callModel(session, "connection", z.object({ ok: z.boolean() }), {}, keys), /insufficient_user_quota/);
+    await transition(session, { action: "config", config: { provider: "compatible", model: "second", baseUrl: second.url }, agentConfigs: {} });
+    await callModel(session, "connection", z.object({ ok: z.boolean() }), {}, keys);
+    assert.equal(first.calls.length, 1);
+    assert.equal(second.calls[0].authorization, "Bearer second-private-key");
+    assert.equal(second.calls[0].body.model, "second");
+    assert.ok(!JSON.stringify(session).includes("private-key"));
+  } finally { await first.close(); await second.close(); }
+});
+
+test("model discovery preserves quota diagnostics without exposing credentials", async () => {
+  const provider = await mockProvider([{ mockStatus: 403, mockBody: { error: { code: "insufficient_user_quota", message: "insufficient user quota synthetic-discovery-key" } } }]);
+  try {
+    await assert.rejects(() => listProviderModels({ provider: "compatible", baseUrl: provider.url, model: "" }, "synthetic-discovery-key"), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /insufficient_user_quota/);
+      assert.ok(!error.message.includes("synthetic-discovery-key"));
+      return true;
+    });
   } finally { await provider.close(); }
 });
 
@@ -151,4 +217,84 @@ test("live stage transitions use the configured adapter instead of the offline f
     assert.ok(!session.artifacts["intake.md"].content.includes("Lumina"));
     assert.ok(JSON.stringify(provider.calls[2].body).includes(answers.wildlife_0));
   } finally { await provider.close(); }
+});
+
+test("temporary keys normalize pasted wrappers without crossing endpoint boundaries", () => {
+  const config = presetConfig("openrouter");
+  assert.equal(normalizeApiKey('  Bearer "synthetic-key"  '), "synthetic-key");
+  assert.equal(providerSecret(config, { [credentialScope(config)]: "  synthetic-key\n" }), "synthetic-key");
+  assert.equal(providerSecret(config, "Bearer synthetic-key"), "synthetic-key");
+  assert.equal(normalizeApiKey("  "), "");
+});
+
+
+test("live interview autofill drafts grounded answers without advancing or overwriting user text", async () => {
+  const provider = await mockProvider([{ answers: [{ id: "retention", answer: "Assumption for review: retain the minimum history needed for auditing; confirm the retention period." }] }]);
+  try {
+    const session = newSession("Design a wildlife rescue register for staff recording animals and care observations.", { provider: "compatible", baseUrl: provider.url, model: "mock" });
+    session.stage = 2; session.completedStages = [1];
+    session.interview.pending = [
+      { id: "entities", category: "Entities & attributes", question: "Which animals and care observations do staff record?", hint: "Describe known data." },
+      { id: "retention", category: "Security & privacy", question: "How long should care history be retained?", hint: "State a retention policy." },
+    ];
+    const before = structuredClone(session.interview);
+    const existing = { entities: "Keep my exact answer about animals and staff.", stale: "Do not include obsolete question IDs." };
+    const answers = await draftInterviewAnswers(session, existing, "temporary-autofill-secret");
+    assert.equal(answers.entities, existing.entities);
+    assert.match(answers.retention, /^Assumption for review:/);
+    assert.equal(answers.stale, undefined);
+    assert.deepEqual(session.interview, before); assert.equal(session.stage, 2);
+    assert.equal(provider.calls[0].authorization, "Bearer temporary-autofill-secret");
+    const payload = JSON.parse((provider.calls[0].body.messages as { content: string }[])[1].content).data;
+    assert.equal(payload.phase, "autofill"); assert.equal(payload.questions.length, 1);
+    assert.equal(payload.brief, session.description); assert.equal(payload.existingAnswers.entities, existing.entities);
+    assert.ok(!JSON.stringify(session.logs).includes("temporary-autofill-secret"));
+    await draftInterviewAnswers(session, answers, "temporary-autofill-secret");
+    assert.equal(provider.calls.length, 1);
+  } finally { await provider.close(); }
+});
+
+test("autofill rejects unrelated generated question IDs and preserves interview state", async () => {
+  const invalid = { answers: [{ id: "unrelated", answer: "Assumption for review: use a conservative default." }] };
+  const provider = await mockProvider([invalid, invalid, invalid]);
+  try {
+    const session = newSession("Design a small equipment lending register for trusted library staff.", { provider: "compatible", baseUrl: provider.url, model: "mock" });
+    session.stage = 2; session.completedStages = [1];
+    session.interview.pending = [{ id: "rules", category: "Business rules", question: "Which rules govern simultaneous item loans?", hint: "Describe loan limits." }];
+    const before = structuredClone(session.interview);
+    await assert.rejects(() => draftInterviewAnswers(session, {}, "synthetic-key"), /each unanswered question exactly once/);
+    assert.deepEqual(session.interview, before); assert.equal(session.stage, 2);
+  } finally { await provider.close(); }
+});
+
+
+test("stage 4 retries truncated JSON with a larger explicit budget and completes all documents", async () => {
+  const previous = process.env.LLM_DESIGN_MAX_TOKENS;
+  delete process.env.LLM_DESIGN_MAX_TOKENS;
+  const provider = await mockProvider([{ mockFinishReason: "length", mockContent: { name: "Incomplete response" } }, demoDesign()]);
+  try {
+    const session = newSession("Design a coworking platform for members, spaces, bookings and billing.", { provider: "compatible", baseUrl: provider.url, model: "mock-design" });
+    session.stage = 4; session.completedStages = [1, 2, 3]; session.choice = structuredClone(demoChoice);
+    await transition(session, { action: "design", apiKey: "design-private-key" });
+    assert.deepEqual(provider.calls.map(call => call.body.max_tokens), [8192, 16384]);
+    assert.equal(session.logs[0].status, "error"); assert.match(session.logs[0].error!, /truncated/);
+    assert.equal(session.stage, 5); assert.ok(session.completedStages.includes(4)); assert.equal(session.designVersion, 1);
+    for (const name of ["conceptual-model.md", "logical-schema.md", "normalization.md", "assumptions.md"]) assert.ok(session.artifacts[name], name);
+    assert.ok(!JSON.stringify(session).includes("design-private-key"));
+  } finally { await provider.close(); if (previous === undefined) delete process.env.LLM_DESIGN_MAX_TOKENS; else process.env.LLM_DESIGN_MAX_TOKENS = previous; }
+});
+
+test("stage 4 respects the configured output ceiling and never completes with truncated output", async () => {
+  const previous = process.env.LLM_DESIGN_MAX_TOKENS;
+  process.env.LLM_DESIGN_MAX_TOKENS = "4096";
+  const truncated = { mockFinishReason: "length", mockContent: demoDesign() };
+  const provider = await mockProvider([truncated, truncated, truncated]);
+  try {
+    const session = newSession("Design a coworking platform for members, spaces, bookings and billing.", { provider: "compatible", baseUrl: provider.url, model: "mock-design" });
+    session.stage = 4; session.completedStages = [1, 2, 3]; session.choice = structuredClone(demoChoice);
+    await assert.rejects(() => transition(session, { action: "design", apiKey: "synthetic-key" }), /LLM_DESIGN_MAX_TOKENS.*4096/);
+    assert.deepEqual(provider.calls.map(call => call.body.max_tokens), [4096, 4096, 4096]);
+    assert.equal(session.stage, 4); assert.equal(session.design, undefined); assert.equal(session.artifacts["logical-schema.md"], undefined);
+    assert.ok(!session.completedStages.includes(4));
+  } finally { await provider.close(); if (previous === undefined) delete process.env.LLM_DESIGN_MAX_TOKENS; else process.env.LLM_DESIGN_MAX_TOKENS = previous; }
 });

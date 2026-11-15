@@ -46,11 +46,9 @@ Presets are based on the teacher's [awesome-free-llm-apis list](https://github.c
 
 Anonymous/public services may log prompts. Use synthetic/public information; do not send confidential business data, real personal information, passwords or other secrets. No fallback silently switches providers or sends a brief to a different endpoint. A free router may itself choose among models; traces record the returned model ID when available.
 
-### Choose each workflow agent
+### Configure the workspace agent
 
-The six model roles are **intake**, **interview**, **DBMS selection**, **design**, **revision**, and **SQL repair**. They are sequential workflow roles, not parallel autonomous agents. Every role can inherit the workspace default or use its own provider and model.
-
-Use **Provider & model per stage** in Settings or beside a live stage: select a **Workflow agent**, uncheck **Use workspace default**, select its provider/model, and click **Save agent selections**. Selections are also saved atomically with the next workflow action. Stage 1 calls both intake and initial-interview roles; SQL compilation is deterministic and only calls the repair role after a validation failure. Approval never invokes a model. All choices and resolved-model traces survive reload; temporary keys do not.
+Inside a live design workspace, the right sidebar shows **What this stage produces**, then **Agent configuration**. Select one provider and model for all stages, enter your temporary key, and use **Load models** and **Test connection**. Click **Save agent configuration**, or run a stage to save the selection automatically. Existing stage-specific overrides are cleared when saving or running from this UI, so they cannot silently select a different provider. Global Settings configure the default for new workspaces. Temporary keys are endpoint-scoped, never saved, and clear on refresh. Surrounding whitespace, copied quotes, and a pasted Bearer prefix are removed from keys.
 
 Keys entered in the UI remain in memory, separately scoped to the exact API base URL. Changing providers cannot accidentally forward another provider's key. The application never stores keys in local/session storage, workspace JSON, artifacts or exports. For persistent server setup, copy `.env.example` to **gitignored** `.env.local` and enter your own keys:
 
@@ -67,6 +65,8 @@ LLM_TIMEOUT_MS=90000
 ```
 
 Named server keys are only used for their catalog endpoint. `LLM_API_KEY` is only used when the chosen provider/base URL matches `LLM_PROVIDER`/`LLM_BASE_URL`. Restart after environment changes. The Settings screen reports configured-key presence, never the secret value. Ollama must run on the same machine as the app's server. Remote APIs require HTTPS; loopback HTTP is supported for local models and tests. Compatible APIs/models must support JSON-object chat completions.
+
+A temporary key takes precedence over server keys; use **Use server key instead** to clear it. Quota, authentication and other non-transient HTTP errors stop immediately rather than retrying three times. Error details identify the actual endpoint, model and credential source without revealing the key. An `insufficient_user_quota` response is the provider reporting unavailable credit/quota for the submitted account/key; increasing a request/token limit or creating another key may not change account credit. Check the provider dashboard and key restrictions. To switch providers, change the workspace endpoint and supply its matching key, not just a different model.
 
 Connection-test attempts are logged separately under gitignored `data/provider-checks/<uuid>.json` (or Redis diagnostics with 30-day retention); they do not clutter the workspace list. Normal stage attempts remain visible in Activity and the workspace export. Provider references: [Kilo Gateway](https://kilo.ai/docs/gateway/models-and-providers), [Groq compatibility](https://console.groq.com/docs/openai), [Gemini compatibility](https://ai.google.dev/gemini-api/docs/openai), [OpenRouter free models](https://openrouter.ai/collections/free-models/).
 
@@ -166,3 +166,17 @@ docs/              Architecture, critique and compliance reports
 ```
 
 The original development journal and acceptance audit remain outside the app and describe an earlier offline sprint, not current verification. See `docs/SPRINT_2.md` for the provider integration, fixes, test evidence and remaining limitations. Local data, output directories, keys, build files and browser reports are gitignored. The public repository includes only reviewed source and synthetic examples.
+
+
+### Interview assistance
+
+In Requirements interview, **Fill automatically** under the status badge drafts unanswered fields from the brief, intake, earlier rounds, and your existing answers. It preserves nonblank edits and marks unconfirmed standard choices as assumptions for review. Review or edit the drafts before submitting; autofill never submits or advances the interview. The offline example uses labelled fixture answers instead of a live model.
+
+Submitting the first round produces an adaptive follow-up with an explanation. Once the reviewed answers are sufficient, submission automatically opens stage 3 (DBMS selection). Provider errors stay visible beside the questions, and draft answers remain available for retry.
+
+
+### Design output capacity and notifications
+
+Design, revision, and repair requests explicitly ask for up to 8192 output tokens initially, doubling after a truncated response up to `LLM_DESIGN_MAX_TOKENS` (default 32768, configurable from 1024 to 65536). Provider/model limits still apply. Design JSON is kept compact, but incomplete responses are never accepted or saved as completed designs. These calls default to a 180-second attempt timeout (other calls use 90 seconds); `LLM_TIMEOUT_MS` overrides either. The adapter caps all attempts in one call to a 270-second overall budget. Choose a higher-output or faster model when provider limits remain insufficient.
+
+Notifications stay visible until their cross button is clicked. Only the newest three are retained; a fourth removes the oldest. Stage-4 failures also appear inline beside the generation button, with saved requirements preserved for retry.

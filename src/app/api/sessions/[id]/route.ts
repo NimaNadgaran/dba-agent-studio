@@ -3,7 +3,7 @@ import { z } from "zod";
 import { authorize, errorResponse, readBody } from "@/lib/http";
 import { readSession, saveSession, withSessionLock } from "@/lib/store";
 import { AppError, agentConfigsSchema, apiKeysSchema, providerSchema } from "@/lib/types";
-import { transition } from "@/lib/workflow";
+import { draftInterviewAnswers, transition } from "@/lib/workflow";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,13 +15,20 @@ export async function GET(request: NextRequest, { params }: Params) {
 export async function POST(request: NextRequest, { params }: Params) {
   try {
     authorize(request);
-    const body = await readBody(request, z.object({ action: z.enum(["intake", "interview", "selection", "design", "revision", "approve", "sql", "config"]), version: z.number().int().min(1), answers: z.record(z.string(), z.string().max(12000)).optional(), request: z.string().max(12000).optional(), config: providerSchema.optional(), agentConfigs: agentConfigsSchema.optional(), apiKeys: apiKeysSchema.optional(), apiKey: z.string().max(1000).optional() }));
+    const body = await readBody(request, z.object({ action: z.enum(["autofill", "intake", "interview", "selection", "design", "revision", "approve", "sql", "config"]), version: z.number().int().min(1), answers: z.record(z.string(), z.string().max(12000)).optional(), request: z.string().max(12000).optional(), config: providerSchema.optional(), agentConfigs: agentConfigsSchema.optional(), apiKeys: apiKeysSchema.optional(), apiKey: z.string().max(1000).optional() }));
     const id = (await params).id;
     return await withSessionLock(id, async () => {
       const session = await readSession(id);
       if (session.version !== body.version) throw new AppError("This workspace changed in another tab. Reload it before continuing.", 409);
       const original = structuredClone(session);
-      try { await transition(session, body); }
+      try {
+        if (body.action === "autofill") {
+          const answers = await draftInterviewAnswers(session, body.answers, body.apiKeys ?? body.apiKey);
+          await saveSession(session);
+          return NextResponse.json({ session, answers });
+        }
+        await transition(session, { ...body, action: body.action });
+      }
       catch (error) {
         original.logs = session.logs;
         await saveSession(original);

@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useId, useState } from "react";
-import { agentLabels, agentStages, credentialScope, matchingPreset, presetConfig, providerListSource, providerPresets, type AgentStage } from "@/lib/provider-catalog";
-import type { AgentConfigs, ApiKeys, ProviderConfig } from "@/lib/types";
+import { normalizeApiKey, credentialScope, matchingPreset, presetConfig, providerListSource, providerPresets } from "@/lib/provider-catalog";
+import type { ApiKeys, ProviderConfig } from "@/lib/types";
 
 type PickerProps = {
   config: ProviderConfig;
@@ -22,7 +22,7 @@ export function ProviderPicker({ config, onChange, apiKeys, onKeyChange, configu
   const [result, setResult] = useState<{ message: string; error?: boolean }>();
   const preset = matchingPreset(config);
   const scope = credentialScope(config);
-  const key = apiKeys[scope] || "";
+  const key = normalizeApiKey(apiKeys[scope] || "");
   const configured = (preset && configuredProviders.includes(preset.id)) || (hasServerKey && serverConfig?.provider === config.provider && credentialScope(serverConfig) === scope);
   const selection = config.provider === "demo" || config.provider === "ollama" ? config.provider : preset?.id || "custom";
 
@@ -57,7 +57,10 @@ export function ProviderPicker({ config, onChange, apiKeys, onKeyChange, configu
       <label className="field-label" htmlFor={`${id}-url`}>API base URL</label>
       <input id={`${id}-url`} type="url" required maxLength={300} value={config.baseUrl} onChange={event => onChange({ ...config, baseUrl: event.target.value })} />
       <label className="field-label" htmlFor={`${id}-key`}>Temporary API key <span>{preset?.anonymous || config.provider === "ollama" ? "Optional" : "Your own key required"}</span></label>
-      <input id={`${id}-key`} type="password" autoComplete="off" maxLength={1000} value={key} onChange={event => onKeyChange(scope, event.target.value)} placeholder={configured ? "Server key configured for this endpoint" : preset?.anonymous ? "Leave blank for anonymous access" : "Paste your personal provider API key"} />
+      <input id={`${id}-key`} type="password" autoComplete="off" maxLength={1000} value={key} onChange={event => onKeyChange(scope, normalizeApiKey(event.target.value))} placeholder={configured ? "Server key configured for this endpoint" : preset?.anonymous ? "Leave blank for anonymous access" : "Paste your personal provider API key"} />
+      <p className="helper-text" aria-live="polite">{key ? "Using the temporary key for this endpoint; it overrides any server key. Test connection to verify it." : configured ? "Server key configured for this endpoint." : preset?.anonymous || config.provider === "ollama" ? "No API key required for this connection." : "No key entered for this endpoint. Paste your provider key above."}</p>
+      {key && <button type="button" className="button button-secondary" disabled={Boolean(busy)} onClick={() => onKeyChange(scope, "")}>{configured ? "Use server key instead" : "Clear temporary key"}</button>}
+      <p className="helper-text">Requests go to {scope || "the API base URL above"}. Changing only the model does not change the provider. Keys from the same account may share account credit. To use another provider, change the provider or API base URL and enter its matching key.</p>
       {preset && !preset.anonymous && <a className="provider-key-link" href={preset.keyUrl} target="_blank" rel="noreferrer noopener">Get your own {preset.name} key</a>}
       <label className="field-label" htmlFor={`${id}-model`}>Model identifier</label>
       <input id={`${id}-model`} value={config.model} maxLength={120} onChange={event => onChange({ ...config, model: event.target.value })} placeholder="Load models or enter the exact model ID" />
@@ -68,23 +71,4 @@ export function ProviderPicker({ config, onChange, apiKeys, onKeyChange, configu
     </>}
     <p className="helper-text"><a href={providerListSource} target="_blank" rel="noreferrer noopener">Teacher's free-provider list</a> · No personal API keys are included or committed.</p>
   </div>;
-}
-
-export function AgentAssignment({ value, onChange, defaultConfig, onSave, initialStage = "intake", disabled, ...picker }: Omit<PickerProps, "config" | "onChange" | "allowDemo"> & {
-  value: AgentConfigs;
-  onChange: (configs: AgentConfigs) => void;
-  defaultConfig: ProviderConfig;
-  onSave: () => void;
-  initialStage?: AgentStage;
-  disabled?: boolean;
-}) {
-  const [stage, setStage] = useState<AgentStage>(initialStage);
-  const id = useId();
-  const override = value[stage];
-  return <section className="panel agent-assignment"><span className="eyebrow">CHOOSE EACH WORKFLOW AGENT</span><h3>Provider & model per stage</h3><p className="helper-text">These are stage-specific model roles, not parallel autonomous agents. Stage 1 also calls the interview agent; stage 6 uses the repair agent only if validation fails.</p>
-    <label className="field-label" htmlFor={`${id}-stage`}>Workflow agent</label><select id={`${id}-stage`} value={stage} onChange={event => setStage(event.target.value as AgentStage)}>{agentStages.map(item => <option key={item} value={item}>{agentLabels[item]}{value[item] ? " · custom" : " · workspace default"}</option>)}</select>
-    <label className="inherit-provider"><input type="checkbox" checked={!override} onChange={event => { const next = { ...value }; if (event.target.checked) delete next[stage]; else next[stage] = defaultConfig.provider === "demo" ? presetConfig("kilo") : { ...defaultConfig }; onChange(next); }} />Use workspace default for this agent</label>
-    {override ? <ProviderPicker {...picker} allowDemo={false} config={override} onChange={config => onChange({ ...value, [stage]: config })} /> : <p className="agent-default">{matchingPreset(defaultConfig)?.name || defaultConfig.provider} · {defaultConfig.model || "Choose a live default in Settings"}</p>}
-    <button type="button" className="button button-secondary" disabled={disabled} onClick={onSave}>Save agent selections</button><p className="helper-text">Selections are also saved when you run a stage. API keys are never part of saved selections.</p>
-  </section>;
 }

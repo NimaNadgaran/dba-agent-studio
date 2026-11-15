@@ -1,6 +1,7 @@
 import type { ProviderConfig } from "./types";
 
 export const providerPresets = [
+  { id: "gapgpt", name: "GapGPT", baseUrl: "https://api.gapgpt.app/v1", model: "", keyEnv: "GAPGPT_API_KEY", keyUrl: "https://gapgpt.app", anonymous: false, note: "Personal API key required. Load available models or enter an exact model ID. Check your account balance and model pricing before use." },
   { id: "kilo", name: "Kilo Gateway (free, no key)", baseUrl: "https://ai-gateway.kilo.ai/api/v1", model: "kilo-auto/free", keyEnv: "KILO_API_KEY", keyUrl: "https://app.kilo.ai", anonymous: true, note: "Anonymous free models only. Shared limits apply; providers may log prompts. Use synthetic data, not confidential information." },
   { id: "groq", name: "Groq", baseUrl: "https://api.groq.com/openai/v1", model: "openai/gpt-oss-20b", keyEnv: "GROQ_API_KEY", keyUrl: "https://console.groq.com/keys", anonymous: false, note: "Personal API key required. Free-tier model quotas apply; check your account limits." },
   { id: "gemini", name: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", model: "", keyEnv: "GEMINI_API_KEY", keyUrl: "https://aistudio.google.com/apikey", anonymous: false, note: "Personal API key required. Load available models and choose one eligible for your free tier. Check data-use terms." },
@@ -30,4 +31,8 @@ export function presetConfig(id: string): ProviderConfig {
 
 export function isFreeModel(model: string) {
   return model === "kilo-auto/free" || model === "openrouter/free" || model.endsWith(":free");
+}
+
+export function normalizeApiKey(value: string): string {
+  return value.trim().replace(/^Bearer\s+/i, "").trim().replace(/^(['"])(.*)\1$/, "$2").trim();
 }

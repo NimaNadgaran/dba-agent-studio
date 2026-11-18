@@ -114,3 +114,27 @@ test("offline automatic answers preserve edits and cannot submit or skip intervi
   assert.equal(session.stage, 3); assert.equal(session.interview.ready, true);
   await assert.rejects(() => draftInterviewAnswers(session), /unfinished interview/);
 });
+
+test("saved workspaces expose legacy design documents as text without regenerating the model", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "dba-agent-text-test-"));
+  const previous = { data: process.env.DATA_DIR, output: process.env.OUTPUT_DIR };
+  try {
+    process.env.DATA_DIR = path.join(temporary, "data"); process.env.OUTPUT_DIR = path.join(temporary, "outputs");
+    const session = await toDesign();
+    session.artifacts["conceptual-model.md"].content = "```mermaid\nerDiagram\n```";
+    await saveSession(session);
+    const restored = await readSession(session.id);
+    assert.match(restored.artifacts["conceptual-model.md"].content, /This text explains the entity-relationship diagram/);
+    assert.doesNotMatch(restored.artifacts["conceptual-model.md"].content, /```|erDiagram/);
+    assert.deepEqual(restored.design, session.design);
+    assert.equal(restored.logs.length, session.logs.length);
+    assert.equal(restored.version, session.version);
+    assert.equal(restored.designVersion, session.designVersion);
+    assert.equal(restored.artifacts["conceptual-model.md"].updatedAt, session.artifacts["conceptual-model.md"].updatedAt);
+    await saveSession(restored);
+    assert.equal(await readFile(path.join(temporary, "outputs", restored.id, "conceptual-model.md"), "utf8"), restored.artifacts["conceptual-model.md"].content);
+  } finally {
+    if (previous.data === undefined) delete process.env.DATA_DIR; else process.env.DATA_DIR = previous.data;
+    if (previous.output === undefined) delete process.env.OUTPUT_DIR; else process.env.OUTPUT_DIR = previous.output;
+  }
+});

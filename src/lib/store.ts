@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { AppError, type CallLog, type Session, type SessionSummary } from "./types";
+import { designTextOutputs } from "./design-documents";
 
 const queues = new Map<string, Promise<unknown>>();
 const remote = () => Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
@@ -22,7 +23,12 @@ export async function readSession(id: string): Promise<Session> {
   try {
     const value = remote() ? await redis(["GET", `dba:session:${id}`]) : await fs.readFile(path.join(dataRoot(), `${id}.json`), "utf8");
     if (!value) throw new AppError("Workspace not found.", 404);
-    return JSON.parse(String(value)) as Session;
+    const session = JSON.parse(String(value)) as Session;
+    for (const document of designTextOutputs(session)) {
+      const artifact = session.artifacts[document.name];
+      if (artifact) artifact.content = document.content;
+    }
+    return session;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new AppError("Workspace not found.", 404);
     throw error;

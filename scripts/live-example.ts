@@ -30,8 +30,13 @@ async function main() {
 
   const step = async (action: WorkflowAction) => {
     process.stdout.write(`Running ${action.action}…\n`);
-    try { await transition(session, action); }
-    finally { await saveSession(session); }
+    let parts = 0;
+    do {
+      try { await transition(session, action); }
+      finally { await saveSession(session); }
+      parts += 1;
+      if (parts >= 31 && action.action === "design" && !session.design) throw new Error("Design exceeded the part safety limit; saved progress can be resumed.");
+    } while (action.action === "design" && !session.design);
     process.stdout.write(`Saved ${action.action}; ${session.logs.length} logged attempts.\n`);
   };
   if (!fromExisting) {

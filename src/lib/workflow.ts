@@ -3,6 +3,7 @@ import { z } from "zod";
 import { artifact, designFileNames, writeChangelog, writeChoice, writeDesign, writeIntake, writeRequirements, writeValidation } from "./artifacts";
 import { demoAnswers, demoBrief, demoChoice, demoDesign, demoFollowups, demoIntake, demoQuestions } from "./demo";
 import { generateSQL, validateDesign } from "./design";
+import { advanceDesign } from "./design-generation";
 import { callModel, environmentConfig, recordDemo } from "./provider";
 import { AppError, categories, choiceSchema, designSchema, intakeSchema, interviewSchema, type AgentConfigs, type ApiKeys, type Design, type ProviderConfig, type Session, type Stage } from "./types";
 import { validateSQL } from "./validation";
@@ -103,10 +104,12 @@ export async function transition(session: Session, action: WorkflowAction): Prom
     writeChoice(session); complete(session, 3, 4);
   } else if (action.action === "design") {
     requireState(session.choice && !session.design, "Choose a DBMS first; use revisions to update an existing design.");
-    const design = demo ? demoDesign() : await callModel(session, "design", designSchema, context(session), apiKey, validateDesign);
+    const design = demo ? demoDesign() : await advanceDesign(session, apiKey);
+    if (!design) return session;
     validateDesign(design);
     if (demo) recordDemo(session, "design", context(session), design);
     session.design = design; session.designVersion = 1;
+    delete session.designDraft;
     writeDesign(session); complete(session, 4, 5);
   } else if (action.action === "revision") {
     requireState(session.design && session.choice, "Generate a design before requesting revisions.");

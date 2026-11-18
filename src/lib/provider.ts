@@ -100,23 +100,24 @@ export async function listProviderModels(config: ProviderConfig, apiKeys?: strin
   return [...new Set<string>(models)].filter(id => !["kilo", "openrouter"].includes(preset?.id ?? "") || isFreeModel(id)).sort();
 }
 
-export async function callModel<T>(session: Session, stage: string, schema: z.ZodType<T>, input: unknown, apiKey?: string | ApiKeys, validate?: (result: T) => void): Promise<T> {
+export async function callModel<T>(session: Session, stage: string, schema: z.ZodType<T>, input: unknown, apiKey?: string | ApiKeys, validate?: (result: T) => void, options?: { prompt: "design-plan" | "design-table"; label: string }): Promise<T> {
   const config = session.agentConfigs?.[stage as keyof NonNullable<Session["agentConfigs"]>] ?? session.config;
   providerReady(config, apiKey);
   if (config.provider === "demo") throw new AppError("Offline mode only supports its clearly labelled example. Use a live provider for arbitrary briefs.");
   const common = await fs.readFile(path.join(process.cwd(), "prompts", "system.md"), "utf8");
-  const prompt = await fs.readFile(path.join(process.cwd(), "prompts", `${stage}.md`), "utf8");
-  const contract = ["design", "revision", "repair"].includes(stage) ? await fs.readFile(path.join(process.cwd(), "prompts", "design-contract.md"), "utf8") : "";
+  const prompt = await fs.readFile(path.join(process.cwd(), "prompts", `${options?.prompt ?? stage}.md`), "utf8");
+  const contract = !options && ["design", "revision", "repair"].includes(stage) ? await fs.readFile(path.join(process.cwd(), "prompts", "design-contract.md"), "utf8") : "";
   const selectionContract = stage === "revision" ? await fs.readFile(path.join(process.cwd(), "prompts", "selection.md"), "utf8") : "";
   const secret = providerSecret(config, apiKey);
   const secrets = [secret, ...(typeof apiKey === "object" ? Object.values(apiKey) : [])].filter(Boolean);
   const redact = (value: string) => secrets.reduce((text, key) => text.replaceAll(key, "[REDACTED]"), value);
-  const maxAttempts = Math.max(1, Math.min(4, Number(process.env.LLM_MAX_ATTEMPTS) || 3));
+  const maxAttempts = Math.max(1, Math.min(options ? 2 : 4, Number(process.env.LLM_MAX_ATTEMPTS) || 3));
+  const stageLabel = options?.label || stage;
   const largeOutput = ["design", "revision", "repair"].includes(stage);
-  const outputLimit = Math.max(1024, Math.min(65536, Math.floor(Number(process.env.LLM_DESIGN_MAX_TOKENS) || 32768)));
-  let outputTokens = Math.min(8192, outputLimit);
-  const timeoutMs = Math.max(5000, Math.min(180000, Number(process.env.LLM_TIMEOUT_MS) || (largeOutput ? 180000 : 90000)));
-  const deadline = Date.now() + 270000;
+  const outputLimit = Math.max(1024, Math.min(options ? 8192 : 65536, Math.floor(Number(process.env.LLM_DESIGN_MAX_TOKENS) || 32768)));
+  let outputTokens = Math.min(options?.prompt === "design-plan" ? 2048 : options ? 4096 : 8192, outputLimit);
+  const timeoutMs = Math.max(5000, Math.min(180000, Number(process.env.LLM_TIMEOUT_MS) || (options ? 60000 : largeOutput ? 180000 : 90000)));
+  const deadline = Date.now() + (options ? 150000 : 270000);
   let attempts = 0;
   let lastError = "";
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -150,11 +151,11 @@ export async function callModel<T>(session: Session, stage: string, schema: z.Zo
     } catch (error) {
       lastError = redact(error instanceof Error ? error.message : String(error));
       session.logs.push({ id: randomUUID(), at: new Date().toISOString(), stage, provider: matchingPreset(config)?.id || config.provider, model: config.model, baseUrl: config.baseUrl, attempt, durationMs: Date.now() - started, status: "error", input: redact(JSON.stringify(messages)), output: redact(output), error: lastError });
-      if (error instanceof ProviderHttpError && !error.retryable) throw new AppError(`The ${stage} stage stopped after ${attempt} attempt${attempt === 1 ? "" : "s"}. ${lastError}`, error.status);
+      if (error instanceof ProviderHttpError && !error.retryable) throw new AppError(`The ${stageLabel} stage stopped after ${attempt} attempt${attempt === 1 ? "" : "s"}. ${lastError}`, error.status);
       if (attempt < maxAttempts) await new Promise(resolve => setTimeout(resolve, attempt * 350));
     }
   }
-  throw new AppError(`The ${stage} stage could not complete after ${attempts} attempts. ${lastError}`, 502);
+  throw new AppError(`The ${stageLabel} stage could not complete after ${attempts} attempts. ${lastError}`, 502);
 }
 
 export function recordDemo(session: Session, stage: string, input: unknown, output: unknown) {

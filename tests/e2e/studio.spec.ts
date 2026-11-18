@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import JSZip from "jszip";
 import { promises as fs } from "node:fs";
 import { demoAnswers, demoChoice, demoDesign } from "../../src/lib/demo";
+import { orderedTables } from "../../src/lib/design";
 import { createServer } from "node:http";
 import { categories } from "../../src/lib/types";
 
@@ -33,7 +34,15 @@ test("desktop guided example completes all six stages, renders diagrams and expo
   await expect(page.locator(".selected-engine")).toContainText("PostgreSQL");
   await page.getByRole("button", { name: "Build the design", exact: true }).click();
   await page.getByRole("button", { name: "Generate a complete design" }).click();
-  await expect(page.locator(".table-inventory>div")).toHaveCount(8);
+  await expect(page.locator(".design-text-output")).toHaveCount(4);
+    await expect(page.locator(".design-text-output pre")).toHaveCount(4);
+    await expect(page.locator(".design-text-output img, .design-text-output svg, .design-text-output .diagram-view")).toHaveCount(0);
+  for (const name of ["conceptual-model.md", "logical-schema.md", "normalization.md", "assumptions.md"]) {
+    await page.locator(".stage-aside").getByRole("button", { name, exact: false }).click();
+    await expect(page.locator(".preview-content .design-text-preview")).toContainText("This text explains");
+    await expect(page.locator(".preview-content img, .preview-content svg, .preview-content .diagram-view, .preview-content table")).toHaveCount(0);
+    await page.getByRole("button", { name: "Close artifact", exact: true }).click();
+  }
   await page.getByRole("button", { name: "Relationship map", exact: true }).click();
   await expect(page.locator(".diagram-view svg")).toBeVisible();
   await expect(page.locator(".diagram-view")).not.toContainText("could not render");
@@ -58,6 +67,11 @@ test("desktop guided example completes all six stages, renders diagrams and expo
   for (const name of ["intake.md", "requirements.md", "dbms-choice.md", "conceptual-model.md", "logical-schema.md", "normalization.md", "assumptions.md", "changelog.md", "schema.sql", "seed.sql", "validation.md", "design.json", "llm-calls.json", "session.json"]) expect(zip.file(name), name).toBeTruthy();
   expect(await zip.file("schema.sql")!.async("string")).toContain('"phone"');
   expect(await zip.file("requirements.md")!.async("string")).toContain("Interview round 2");
+  for (const name of ["conceptual-model.md", "logical-schema.md", "normalization.md", "assumptions.md"]) {
+    const text = await zip.file(name)!.async("string");
+    expect(text).toContain("This text explains");
+    expect(text).not.toMatch(/```|erDiagram|<svg|<img|!\[/);
+  }
   const workspaceUrl = page.url();
   await page.reload();
   await expect(page.getByText("Executed. Checked. Ready.", { exact: true })).toBeVisible();
@@ -135,15 +149,15 @@ test("production API executes PostgreSQL and honestly reports MySQL and SQL Serv
 });
 
 test("live provider picker discovers models, tests JSON, uses shared workspace configuration and never persists keys", async ({ page, request }) => {
-  const calls: { model?: string; authorization?: string }[] = [];
+  const calls: { model?: string; authorization?: string; phase?: string; table?: string }[] = [];
   const server = createServer(async (incoming, outgoing) => {
     outgoing.setHeader("content-type", "application/json");
     if (incoming.method === "GET") { outgoing.end(JSON.stringify({ data: [{ id: "mock-intake" }, { id: "mock-interview" }] })); return; }
     let text = ""; for await (const chunk of incoming) text += chunk;
     const body = JSON.parse(text);
-    calls.push({ model: body.model, authorization: incoming.headers.authorization });
     const input = JSON.parse(body.messages[1].content).data;
-    const result = body.messages[0].content.includes("# Provider connection check") ? { ok: true } : input.choice ? demoDesign() : input.interview?.ready && !input.phase ? demoChoice : input.phase === "autofill" ? {
+    calls.push({ model: body.model, authorization: incoming.headers.authorization, phase: input.phase, table: input.target?.name });
+    const result = body.messages[0].content.includes("# Provider connection check") ? { ok: true } : input.phase === "plan" ? { ...demoDesign(), tables: orderedTables(demoDesign()).map(table => ({ name: table.name, purpose: table.purpose, dependsOn: [...new Set(table.foreignKeys.map(key => key.refTable).filter(name => name !== table.name))] })) } : input.phase === "table" ? { table: demoDesign().tables.find(table => table.name === input.target.name) } : input.interview?.ready && !input.phase ? demoChoice : input.phase === "autofill" ? {
       answers: input.questions.map((question: { id: string }) => ({ id: question.id, answer: "Assumption for review: use conservative staff-only access, preserve referenced records, and confirm any unknown business limits." })),
     } : input.phase === "evaluate" ? input.rounds.length >= 2 ? {
       ready: true, questions: [], rationale: "The initial requirements and targeted follow-up have been reviewed.", summary: "Staff record rescued animals and care observations. Use mandatory identifiers and foreign keys, restrict deletion of referenced history, use staff-only access, and document conservative assumptions for unconfirmed volume and retention.",
@@ -245,21 +259,48 @@ test("live provider picker discovers models, tests JSON, uses shared workspace c
     expect(JSON.stringify(completed)).not.toContain(secret);
     await page.getByRole("button", { name: "Compare & select a DBMS", exact: true }).click();
     await page.getByRole("button", { name: "Build the design", exact: true }).click();
+    let designRequests = 0;
     const failDesign = async (route: import("@playwright/test").Route) => {
-      if (route.request().method() === "POST" && route.request().postDataJSON().action === "design") {
+      if (route.request().method() === "POST" && route.request().postDataJSON().action === "design" && ++designRequests === 3) {
         await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "Synthetic design generation failure" }) });
-        await page.unroute(`**/api/sessions/${id}`, failDesign);
+        await page.unroute("**/api/sessions/" + id, failDesign);
       } else await route.continue();
     };
-    await page.route(`**/api/sessions/${id}`, failDesign);
+    await page.route("**/api/sessions/" + id, failDesign);
     await page.getByRole("button", { name: "Generate a complete design", exact: true }).click();
     await expect(page.locator(".stage-panel [role=alert]")).toContainText("Your saved requirements are unchanged");
-    await page.getByRole("button", { name: "Generate a complete design", exact: true }).click();
-    await expect(page.locator(".table-inventory>div")).toHaveCount(8);
+    await expect(page.getByRole("status", { name: "Design generation progress" })).toContainText("1 of 8 tables saved");
+    const partial = (await (await request.get("/api/sessions/" + id)).json()).session;
+    expect(partial.designDraft.tables).toHaveLength(1);
+    expect(partial.design).toBeUndefined(); expect(partial.completedStages).not.toContain(4);
+    expect(partial.artifacts["logical-schema.md"]).toBeUndefined();
+    let releasePart!: () => void;
+    const gate = new Promise<void>(resolve => { releasePart = resolve; });
+    const holdPart = async (route: import("@playwright/test").Route) => {
+      if (route.request().method() === "POST" && route.request().postDataJSON().action === "design") await gate;
+      await route.continue();
+    };
+    await page.route("**/api/sessions/" + id, holdPart);
+    await page.getByRole("button", { name: "Resume design", exact: true }).click();
+    await page.getByRole("button", { name: "Pause after current part", exact: true }).click();
+    releasePart();
+    await expect(page.getByRole("button", { name: "Resume design", exact: true })).toBeEnabled();
+    await expect(page.getByRole("status", { name: "Design generation progress" })).toContainText("2 of 8 tables saved");
+    await page.unroute("**/api/sessions/" + id, holdPart);
+    await page.reload();
+    await expect(page.getByRole("status", { name: "Design generation progress" })).toContainText("2 of 8 tables saved");
+    await page.locator(".stage-aside").getByLabel("Temporary API key", { exact: false }).fill(secret);
+    await page.getByRole("button", { name: "Resume design", exact: true }).click();
+    await expect(page.locator(".design-text-output")).toHaveCount(4);
+    await expect(page.locator(".design-text-output pre")).toHaveCount(4);
+    await expect(page.locator(".design-text-output img, .design-text-output svg, .design-text-output .diagram-view")).toHaveCount(0);
     await expect(page.locator(".stage-panel [role=alert]")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Review & refine the design", exact: true })).toBeVisible();
     const designed = (await (await request.get(`/api/sessions/${id}`)).json()).session;
     expect(designed.completedStages).toContain(4); expect(designed.stage).toBe(5);
+    expect(designed.designDraft).toBeUndefined();
+    expect(calls.filter(call => call.phase === "plan")).toHaveLength(1);
+    expect(calls.filter(call => call.phase === "table").map(call => call.table)).toEqual(orderedTables(demoDesign()).map(table => table.name));
     for (const name of ["conceptual-model.md", "logical-schema.md", "normalization.md", "assumptions.md"]) expect(designed.artifacts[name]).toBeTruthy();
     await page.reload();
     await expect(page.locator(".stage-aside").getByLabel("Model identifier", { exact: true })).toHaveValue("mock-interview");

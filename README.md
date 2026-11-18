@@ -79,11 +79,13 @@ The offline Lumina example remains a **labelled deterministic fixture**, not rea
 | 1. System intake | Natural-language brief | Structured actors, entities, processes, risks; `intake.md` |
 | 2. Interview | Seven-category questions and user answers | At least one adaptive follow-up; model decides when sufficient; `requirements.md` |
 | 3. DBMS choice | Consolidated requirements | PostgreSQL/MySQL/SQLite/SQL Server comparison, rationale and rejection reasons; `dbms-choice.md` |
-| 4. Documentation | Requirements + DBMS | `conceptual-model.md`, `logical-schema.md`, `normalization.md`, `assumptions.md`, `design.json`; live Mermaid ER map |
+| 4. Documentation | Requirements + DBMS | Four text-only explanations: `conceptual-model.md`, `logical-schema.md`, `normalization.md`, `assumptions.md`; the internal model remains in `design.json` |
 | 5. Revision & approval | Natural-language changes | Regenerates all affected documents, records `changelog.md`, invalidates prior approval/SQL; explicit approval is mandatory |
 | 6. SQL & validation | Explicitly approved model | `schema.sql`, `seed.sql`, `validation.md`; complete ZIP export |
 
 All artifacts remain inspectable in the stage output panel and Artifacts tab. Continue buttons keep the client in control instead of skipping past results. Prompt library shows the actual server prompt files. Activity shows full inputs/outputs, timings, provider/model, success/failure, and attempt counts. Interview drafts survive page reloads. Sessions resume from their saved URL or dashboard.
+
+Stage 4 shows each of its four outputs as readable text, describing the conceptual relationships, logical schema, normalization and assumptions without embedded diagrams, images or Markdown tables. Previews and exported documents use the same text. Existing saved workspaces are presented in this format from their canonical model without new AI calls. The separate Relationship map tab remains available outside these four text outputs.
 
 ### Try a complete example
 
@@ -177,6 +179,8 @@ Submitting the first round produces an adaptive follow-up with an explanation. O
 
 ### Design output capacity and notifications
 
-Design, revision, and repair requests explicitly ask for up to 8192 output tokens initially, doubling after a truncated response up to `LLM_DESIGN_MAX_TOKENS` (default 32768, configurable from 1024 to 65536). Provider/model limits still apply. Design JSON is kept compact, but incomplete responses are never accepted or saved as completed designs. These calls default to a 180-second attempt timeout (other calls use 90 seconds); `LLM_TIMEOUT_MS` overrides either. The adapter caps all attempts in one call to a 270-second overall budget. Choose a higher-output or faster model when provider limits remain insufficient.
+Live stage 4 uses separate, resumable requests: first a compact table/dependency plan, then one complete table (schema, constraints, normalization and three sample rows) per request. Each successful part is persisted with the workspace before the next request starts. The UI shows saved table progress and can pause after the current part; **Resume design** continues after a pause, error or reload without regenerating finished tables. Temporary keys still need re-entry after refresh. Partial drafts do not unlock approval/SQL or count as a completed design. Final cross-table validation and all documents are compiled locally from the assembled canonical model. The API action `design` advances one part per call for live workspaces; callers repeat it using each returned session version until `session.design` exists. The offline example remains a single deterministic step.
+
+Design subtask responses start with 2048 output tokens for planning and 4096 for a table, doubling only on truncation to a ceiling of min(8192, `LLM_DESIGN_MAX_TOKENS`). Each subtask gets at most two attempts, a default 60-second attempt timeout and a 150-second overall budget. `LLM_MAX_ATTEMPTS` can lower the attempt count and `LLM_TIMEOUT_MS` overrides the per-attempt timeout within the overall budget. Revision/repair calls retain their full-model contract, 8192-token initial budget, configurable ceiling (default 32768), 180-second default attempt timeout and 270-second overall budget. Model/provider limits still apply; incomplete or invalid data never counts as a finished design.
 
 Notifications stay visible until their cross button is clicked. Only the newest three are retained; a fourth removes the oldest. Stage-4 failures also appear inline beside the generation button, with saved requirements preserved for retry.

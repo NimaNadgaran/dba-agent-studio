@@ -7,7 +7,8 @@ import { normalizeApiKey, credentialScope, presetConfig } from "../src/lib/provi
 import { agentConfigsSchema } from "../src/lib/types";
 import { demoAnswers, draftInterviewAnswers, newSession, transition } from "../src/lib/workflow";
 import { demoChoice, demoDesign } from "../src/lib/demo";
-import type { Session } from "../src/lib/types";
+import type { Design, Session } from "../src/lib/types";
+import { orderedTables } from "../src/lib/design";
 
 async function mockProvider(responses: (string | object)[]) {
   const calls: { authorization?: string; body: Record<string, unknown> }[] = [];
@@ -268,33 +269,104 @@ test("autofill rejects unrelated generated question IDs and preserves interview 
 });
 
 
-test("stage 4 retries truncated JSON with a larger explicit budget and completes all documents", async () => {
+function planFor(design: Design) {
+  return { ...design, tables: orderedTables(design).map(table => ({ name: table.name, purpose: table.purpose, dependsOn: [...new Set(table.foreignKeys.map(key => key.refTable).filter(name => name !== table.name))] })) };
+}
+
+function designSession(url: string) {
+  const session = newSession("Design a coworking platform for members, spaces, bookings and billing.", { provider: "compatible", baseUrl: url, model: "mock-design" });
+  session.stage = 4; session.completedStages = [1, 2, 3]; session.choice = structuredClone(demoChoice);
+  return session;
+}
+
+test("stage 4 generates a compact plan, then one validated table per call, and compiles all documents", async () => {
   const previous = process.env.LLM_DESIGN_MAX_TOKENS;
   delete process.env.LLM_DESIGN_MAX_TOKENS;
-  const provider = await mockProvider([{ mockFinishReason: "length", mockContent: { name: "Incomplete response" } }, demoDesign()]);
+  const design = demoDesign();
+  const tables = orderedTables(design);
+  const provider = await mockProvider([planFor(design), { mockFinishReason: "length", mockContent: {} }, ...tables.map(table => ({ table }))]);
   try {
-    const session = newSession("Design a coworking platform for members, spaces, bookings and billing.", { provider: "compatible", baseUrl: provider.url, model: "mock-design" });
-    session.stage = 4; session.completedStages = [1, 2, 3]; session.choice = structuredClone(demoChoice);
+    const session = designSession(provider.url);
     await transition(session, { action: "design", apiKey: "design-private-key" });
-    assert.deepEqual(provider.calls.map(call => call.body.max_tokens), [8192, 16384]);
-    assert.equal(session.logs[0].status, "error"); assert.match(session.logs[0].error!, /truncated/);
+    assert.equal(session.stage, 4); assert.equal(session.design, undefined);
+    assert.equal(session.designDraft?.tables.length, 0);
+    assert.equal(session.artifacts["logical-schema.md"], undefined);
+    for (let index = 0; index < tables.length; index++) {
+      await transition(session, { action: "design", apiKey: "design-private-key" });
+      if (index < tables.length - 1) {
+        assert.equal(session.designDraft?.tables.length, index + 1);
+        assert.equal(session.design, undefined);
+        assert.ok(!session.completedStages.includes(4));
+      }
+    }
+    assert.deepEqual(provider.calls.map(call => call.body.max_tokens), [2048, 4096, 8192, ...tables.slice(1).map(() => 4096)]);
+    assert.match(session.logs[1].error!, /truncated/);
     assert.equal(session.stage, 5); assert.ok(session.completedStages.includes(4)); assert.equal(session.designVersion, 1);
+    assert.equal(session.designDraft, undefined);
+    assert.deepEqual((session as Session).design?.tables.map(table => table.name), tables.map(table => table.name));
     for (const name of ["conceptual-model.md", "logical-schema.md", "normalization.md", "assumptions.md"]) assert.ok(session.artifacts[name], name);
     assert.ok(!JSON.stringify(session).includes("design-private-key"));
+    const planMessages = provider.calls[0].body.messages as { content: string }[];
+    assert.ok(!planMessages[0].content.includes("# Canonical design JSON contract"));
+    const tableInput = JSON.parse((provider.calls[2].body.messages as { content: string }[])[1].content).data;
+    assert.equal(tableInput.phase, "table"); assert.equal(tableInput.target.name, tables[0].name);
+    assert.equal(tableInput.interview, undefined);
   } finally { await provider.close(); if (previous === undefined) delete process.env.LLM_DESIGN_MAX_TOKENS; else process.env.LLM_DESIGN_MAX_TOKENS = previous; }
 });
 
-test("stage 4 respects the configured output ceiling and never completes with truncated output", async () => {
+test("stage 4 caps each table's retries and preserves its plan after truncated output", async () => {
   const previous = process.env.LLM_DESIGN_MAX_TOKENS;
   process.env.LLM_DESIGN_MAX_TOKENS = "4096";
-  const truncated = { mockFinishReason: "length", mockContent: demoDesign() };
-  const provider = await mockProvider([truncated, truncated, truncated]);
+  const truncated = { mockFinishReason: "length", mockContent: {} };
+  const provider = await mockProvider([planFor(demoDesign()), truncated, truncated]);
   try {
-    const session = newSession("Design a coworking platform for members, spaces, bookings and billing.", { provider: "compatible", baseUrl: provider.url, model: "mock-design" });
-    session.stage = 4; session.completedStages = [1, 2, 3]; session.choice = structuredClone(demoChoice);
+    const session = designSession(provider.url);
+    await transition(session, { action: "design", apiKey: "synthetic-key" });
+    const draft = structuredClone(session.designDraft);
     await assert.rejects(() => transition(session, { action: "design", apiKey: "synthetic-key" }), /LLM_DESIGN_MAX_TOKENS.*4096/);
-    assert.deepEqual(provider.calls.map(call => call.body.max_tokens), [4096, 4096, 4096]);
+    assert.deepEqual(provider.calls.map(call => call.body.max_tokens), [2048, 4096, 4096]);
+    assert.deepEqual(session.designDraft, draft);
     assert.equal(session.stage, 4); assert.equal(session.design, undefined); assert.equal(session.artifacts["logical-schema.md"], undefined);
     assert.ok(!session.completedStages.includes(4));
   } finally { await provider.close(); if (previous === undefined) delete process.env.LLM_DESIGN_MAX_TOKENS; else process.env.LLM_DESIGN_MAX_TOKENS = previous; }
+});
+
+test("stage 4 resumes serialized progress and retries only the failed table without changing parents", async () => {
+  const design = demoDesign();
+  const tables = orderedTables(design);
+  const invalid = { ...tables[1], foreignKeys: [{ columns: tables[1].primaryKey, refTable: "not_planned", refColumns: ["id"], onDelete: "RESTRICT" }] };
+  const provider = await mockProvider([planFor(design), { table: tables[0] }, { table: invalid }, { table: invalid }, { table: tables[1] }]);
+  try {
+    const session = designSession(provider.url);
+    await transition(session, { action: "design", apiKey: "synthetic-key" });
+    await transition(session, { action: "design", apiKey: "synthetic-key" });
+    const draft = structuredClone(session.designDraft);
+    await assert.rejects(() => transition(session, { action: "design", apiKey: "synthetic-key" }), /declared dependencies/);
+    assert.deepEqual(session.designDraft, draft);
+    const resumed = JSON.parse(JSON.stringify(session)) as Session;
+    await transition(resumed, { action: "design", apiKey: "replacement-key" });
+    assert.equal(resumed.designDraft?.tables.length, 2);
+    assert.deepEqual(resumed.designDraft?.tables[0], tables[0]);
+    assert.equal(provider.calls.at(-1)?.authorization, "Bearer replacement-key");
+    const inputs = provider.calls.map(call => JSON.parse((call.body.messages as { content: string }[])[1].content).data);
+    assert.deepEqual(inputs.map(input => input.phase), ["plan", "table", "table", "table", "table"]);
+    assert.deepEqual(inputs.slice(2).map(input => input.target.name), [tables[1].name, tables[1].name, tables[1].name]);
+    await assert.rejects(() => transition(resumed, { action: "approve" }), /Generate and review/);
+    await assert.rejects(() => transition(resumed, { action: "sql" }), /Explicitly approve/);
+  } finally { await provider.close(); }
+});
+
+test("stage 4 rejects duplicate or forward/circular plan dependencies before saving a draft", async () => {
+  const valid = planFor(demoDesign());
+  const duplicate = { ...valid, tables: [valid.tables[0], valid.tables[0]] };
+  const cycle = { ...valid, tables: [{ ...valid.tables[0], dependsOn: [valid.tables[1].name] }, valid.tables[1]] };
+  for (const invalid of [duplicate, cycle]) {
+    const provider = await mockProvider([invalid, invalid]);
+    try {
+      const session = designSession(provider.url);
+      await assert.rejects(() => transition(session, { action: "design", apiKey: "synthetic-key" }), /distinct name|parent-first/);
+      assert.equal(session.designDraft, undefined); assert.equal(session.design, undefined);
+      assert.equal(provider.calls.length, 2);
+    } finally { await provider.close(); }
+  }
 });

@@ -91,6 +91,15 @@ export const designSchema = z.object({
 });
 export type Design = z.infer<typeof designSchema>;
 export type Table = Design["tables"][number];
+export const designPlanSchema = designSchema.omit({ tables: true }).extend({
+  tables: z.array(z.object({
+    name: identifier,
+    purpose: z.string().min(10),
+    dependsOn: z.array(identifier).max(30),
+  })).min(1).max(30),
+});
+export type DesignPlan = z.infer<typeof designPlanSchema>;
+export type DesignDraft = { plan: DesignPlan; tables: Table[] };
 export type Stage = 1 | 2 | 3 | 4 | 5 | 6;
 export type Artifact = { name: string; content: string; stage: Stage; updatedAt: string; version: number };
 export type CallLog = {
@@ -108,7 +117,7 @@ export type Session = {
   stage: Stage; completedStages: Stage[]; mode: "demo" | "live"; config: ProviderConfig;
   agentConfigs?: AgentConfigs;
   intake?: Intake; interview: { rounds: InterviewRound[]; pending: Question[]; ready: boolean; summary: string; rationale: string };
-  choice?: Choice; design?: Design; designVersion: number; approvedAt?: string;
+  choice?: Choice; design?: Design; designDraft?: DesignDraft; designVersion: number; approvedAt?: string;
   artifacts: Record<string, Artifact>; changes: Change[]; logs: CallLog[];
   validation?: Validation; validationHistory: Validation[];
 };

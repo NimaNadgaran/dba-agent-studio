@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { AppError, type ApiKeys, type ProviderConfig, type Session } from "./types";
+import { AppError, type ApiKeys, type CallLog, type ProviderConfig, type Session } from "./types";
 import { normalizeApiKey, credentialScope, isFreeModel, matchingPreset, presetConfig } from "./provider-catalog";
 
 export function environmentConfig(): ProviderConfig {
@@ -100,6 +100,10 @@ export async function listProviderModels(config: ProviderConfig, apiKeys?: strin
   return [...new Set<string>(models)].filter(id => !["kilo", "openrouter"].includes(preset?.id ?? "") || isFreeModel(id)).sort();
 }
 
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
 export async function callModel<T>(session: Session, stage: string, schema: z.ZodType<T>, input: unknown, apiKey?: string | ApiKeys, validate?: (result: T) => void, options?: { prompt: "design-plan" | "design-table"; label: string }): Promise<T> {
   const config = session.agentConfigs?.[stage as keyof NonNullable<Session["agentConfigs"]>] ?? session.config;
   providerReady(config, apiKey);
@@ -115,47 +119,154 @@ export async function callModel<T>(session: Session, stage: string, schema: z.Zo
   const stageLabel = options?.label || stage;
   const largeOutput = ["design", "revision", "repair"].includes(stage);
   const outputLimit = Math.max(1024, Math.min(options ? 8192 : 65536, Math.floor(Number(process.env.LLM_DESIGN_MAX_TOKENS) || 32768)));
-  let outputTokens = Math.min(options?.prompt === "design-plan" ? 2048 : options ? 4096 : 8192, outputLimit);
-  const timeoutMs = Math.max(5000, Math.min(180000, Number(process.env.LLM_TIMEOUT_MS) || (options ? 60000 : largeOutput ? 180000 : 90000)));
-  const deadline = Date.now() + (options ? 150000 : 270000);
+  let outputTokens = Math.min(options ? 4096 : 8192, outputLimit);
+  const timeoutMs = Math.max(5000, Math.min(180000, Number(process.env.LLM_TIMEOUT_MS) || (options ? 120000 : largeOutput ? 180000 : 90000)));
+  const deadline = Date.now() + (options ? 250000 : 270000);
   let attempts = 0;
   let lastError = "";
+  let correction = "";
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const requestTimeout = Math.min(timeoutMs, deadline - Date.now());
     if (requestTimeout < 1000) { lastError = "The provider request exceeded the overall time budget. Try a faster model or reduce the design scope."; break; }
     attempts = attempt;
     const started = Date.now();
-    const user = JSON.stringify({ data: input, ...(lastError ? { correctionRequired: lastError } : {}) });
+    const user = JSON.stringify({ data: input, ...(correction ? { correctionRequired: correction } : {}) });
     const messages = [{ role: "system", content: `${common}\n\n${prompt}\n\n${contract}\n\n${selectionContract}` }, { role: "user", content: user }];
     let output = "";
+    let modelResponse = false;
+    const trace: Pick<CallLog, "subtask" | "maxOutputTokens" | "httpStatus" | "finishReason" | "resolvedModel" | "usage"> = {
+      subtask: options?.label,
+      maxOutputTokens: largeOutput ? outputTokens : undefined,
+    };
+    const log = (status: CallLog["status"], error?: string) => session.logs.push({ ...trace, id: randomUUID(), at: new Date().toISOString(), stage, provider: matchingPreset(config)?.id || config.provider, model: config.model, baseUrl: config.baseUrl, attempt, durationMs: Date.now() - started, status, input: redact(JSON.stringify(messages)), output: redact(output), error });
     try {
       const response = await fetch(endpoint(config), {
         method: "POST", redirect: "error", headers: { "Content-Type": "application/json", ...(secret ? { Authorization: `Bearer ${secret}` } : {}) },
         body: JSON.stringify({ model: config.model, messages, response_format: { type: "json_object" }, ...(largeOutput ? { max_tokens: outputTokens } : {}) }),
         signal: AbortSignal.timeout(requestTimeout),
       });
+      trace.httpStatus = response.status;
       const body = await boundedText(response);
       if (!response.ok) throw providerHttpError(config, apiKey, response.status, body);
+      modelResponse = true;
       const payload = JSON.parse(body);
-      output = payload.choices?.[0]?.message?.content ?? "";
-      if (payload.choices?.[0]?.finish_reason === "length") {
+      const choice = payload?.choices?.[0];
+      trace.resolvedModel = typeof payload?.model === "string" ? redact(payload.model) : undefined;
+      trace.finishReason = typeof choice?.finish_reason === "string" ? redact(choice.finish_reason) : undefined;
+      const inputTokens = tokenCount(payload?.usage?.prompt_tokens) ?? tokenCount(payload?.usage?.input_tokens);
+      const completionTokens = tokenCount(payload?.usage?.completion_tokens) ?? tokenCount(payload?.usage?.output_tokens);
+      const reasoningTokens = tokenCount(payload?.usage?.completion_tokens_details?.reasoning_tokens) ?? tokenCount(payload?.usage?.output_tokens_details?.reasoning_tokens);
+      if (inputTokens !== undefined || completionTokens !== undefined || reasoningTokens !== undefined) trace.usage = { inputTokens, outputTokens: completionTokens, reasoningTokens };
+      output = typeof choice?.message?.content === "string" ? choice.message.content : "";
+      if (trace.finishReason === "length") {
         const requestedTokens = outputTokens;
         if (largeOutput) outputTokens = Math.min(outputLimit, outputTokens * 2);
-        throw new Error(largeOutput ? `The provider truncated the design at the requested ${requestedTokens}-token budget (the provider may enforce a lower limit). Return compact JSON without reasoning or repeated prose. If retries still truncate, choose a model with more output capacity or adjust LLM_DESIGN_MAX_TOKENS (current ceiling ${outputLimit}).` : "The model output was truncated. Use a model with sufficient output capacity or reduce scope.");
+        throw new Error(largeOutput ? `The provider reported a length limit (requested up to ${requestedTokens} output tokens; the provider may cap it lower). If retries still truncate, choose a model with more output capacity or adjust LLM_DESIGN_MAX_TOKENS (current ceiling ${outputLimit}).` : "The model output was truncated. Use a model with sufficient output capacity or reduce scope.");
       }
-      if (!output) throw new Error("Provider returned no text content.");
+      if (!output) throw new Error(`Provider returned no text content${trace.finishReason ? ` (finish reason: ${trace.finishReason})` : ""}.`);
       const parsed = schema.parse(JSON.parse(output.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "")));
       validate?.(parsed);
-      session.logs.push({ id: randomUUID(), at: new Date().toISOString(), stage, provider: matchingPreset(config)?.id || config.provider, model: config.model, baseUrl: config.baseUrl, resolvedModel: typeof payload.model === "string" ? payload.model : undefined, attempt, durationMs: Date.now() - started, status: "success", input: redact(JSON.stringify(messages)), output: redact(output) });
+      log("success");
       return parsed;
     } catch (error) {
-      lastError = redact(error instanceof Error ? error.message : String(error));
-      session.logs.push({ id: randomUUID(), at: new Date().toISOString(), stage, provider: matchingPreset(config)?.id || config.provider, model: config.model, baseUrl: config.baseUrl, attempt, durationMs: Date.now() - started, status: "error", input: redact(JSON.stringify(messages)), output: redact(output), error: lastError });
+      lastError = error instanceof Error && error.name === "TimeoutError"
+        ? `Timed out waiting for the provider after ${Math.round(requestTimeout / 1000)} seconds. No complete response was received. Try a faster model or adjust LLM_TIMEOUT_MS.`
+        : redact(error instanceof Error ? error.message : String(error));
+      if (modelResponse) correction = trace.finishReason === "length" ? "Return compact JSON without reasoning or repeated prose." : lastError;
+      log("error", lastError);
       if (error instanceof ProviderHttpError && !error.retryable) throw new AppError(`The ${stageLabel} stage stopped after ${attempt} attempt${attempt === 1 ? "" : "s"}. ${lastError}`, error.status);
       if (attempt < maxAttempts) await new Promise(resolve => setTimeout(resolve, attempt * 350));
     }
   }
   throw new AppError(`The ${stageLabel} stage could not complete after ${attempts} attempts. ${lastError}`, 502);
+}
+
+export async function callTextModel(session: Session, stage: string, input: unknown, apiKey?: string | ApiKeys, label = stage): Promise<string> {
+  const config = session.agentConfigs?.[stage as keyof NonNullable<Session["agentConfigs"]>] ?? session.config;
+  providerReady(config, apiKey);
+  if (config.provider === "demo") throw new AppError("Offline mode only supports its clearly labelled example. Use a live provider for arbitrary briefs.");
+  const common = await fs.readFile(path.join(process.cwd(), "prompts", "system.md"), "utf8");
+  const prompt = await fs.readFile(path.join(process.cwd(), "prompts", "design-full.md"), "utf8");
+  const secret = providerSecret(config, apiKey);
+  const secrets = [secret, ...(typeof apiKey === "object" ? Object.values(apiKey) : [])].filter(Boolean);
+  const redact = (value: string) => secrets.reduce((text, key) => text.replaceAll(key, "[REDACTED]"), value);
+  const maxOutputTokens = Math.max(4096, Math.min(16384, Math.floor(Number(process.env.LLM_DESIGN_MAX_TOKENS) || 8192)));
+  const idleTimeoutMs = Math.max(5000, Math.min(180000, Number(process.env.LLM_TIMEOUT_MS) || 90000));
+  const totalTimeoutMs = 280000;
+  const started = Date.now();
+  const messages = [{ role: "system", content: `${common}\n\n${prompt}` }, { role: "user", content: JSON.stringify({ data: input }) }];
+  let output = "";
+  const trace: Pick<CallLog, "subtask" | "maxOutputTokens" | "httpStatus" | "finishReason" | "resolvedModel" | "usage"> = { subtask: label, maxOutputTokens };
+  const log = (status: CallLog["status"], error?: string) => session.logs.push({ ...trace, id: randomUUID(), at: new Date().toISOString(), stage, provider: matchingPreset(config)?.id || config.provider, model: config.model, baseUrl: config.baseUrl, attempt: 1, durationMs: Date.now() - started, status, input: redact(JSON.stringify(messages)), output: redact(output), error });
+  const controller = new AbortController();
+  let timeoutReason = "";
+  const abortWith = (reason: string) => { timeoutReason = reason; controller.abort(); };
+  let idleTimer = setTimeout(() => abortWith(`The provider sent nothing for ${Math.round(idleTimeoutMs / 1000)} seconds.`), idleTimeoutMs);
+  const totalTimer = setTimeout(() => abortWith(`The response did not finish within ${Math.round(totalTimeoutMs / 1000)} seconds.`), totalTimeoutMs);
+  const stillAlive = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => abortWith(`The provider stopped sending text for ${Math.round(idleTimeoutMs / 1000)} seconds.`), idleTimeoutMs); };
+  const readUsage = (usage: Record<string, any> | undefined) => {
+    if (!usage) return;
+    const inputTokens = tokenCount(usage.prompt_tokens) ?? tokenCount(usage.input_tokens);
+    const outputTokens = tokenCount(usage.completion_tokens) ?? tokenCount(usage.output_tokens);
+    const reasoningTokens = tokenCount(usage.completion_tokens_details?.reasoning_tokens) ?? tokenCount(usage.output_tokens_details?.reasoning_tokens);
+    if (inputTokens !== undefined || outputTokens !== undefined || reasoningTokens !== undefined) trace.usage = { inputTokens, outputTokens, reasoningTokens };
+  };
+  try {
+    const response = await fetch(endpoint(config), {
+      method: "POST", redirect: "error", headers: { "Content-Type": "application/json", ...(secret ? { Authorization: `Bearer ${secret}` } : {}) },
+      body: JSON.stringify({ model: config.model, messages, max_tokens: maxOutputTokens, stream: true, stream_options: { include_usage: true } }),
+      signal: controller.signal,
+    });
+    trace.httpStatus = response.status;
+    if (!response.ok) throw providerHttpError(config, apiKey, response.status, await boundedText(response));
+    if (!(response.headers.get("content-type") || "").includes("text/event-stream")) {
+      const payload = JSON.parse(await boundedText(response));
+      const choice = payload?.choices?.[0];
+      trace.resolvedModel = typeof payload?.model === "string" ? redact(payload.model) : undefined;
+      trace.finishReason = typeof choice?.finish_reason === "string" ? redact(choice.finish_reason) : undefined;
+      readUsage(payload?.usage);
+      output = typeof choice?.message?.content === "string" ? choice.message.content : "";
+    } else {
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let bytes = 0;
+      const handle = (line: string) => {
+        const data = line.replace(/^data:\s?/, "").trim();
+        if (!line.startsWith("data:") || !data || data === "[DONE]") return;
+        const chunk = JSON.parse(data);
+        if (typeof chunk?.model === "string") trace.resolvedModel = redact(chunk.model);
+        readUsage(chunk?.usage);
+        const choice = chunk?.choices?.[0];
+        if (typeof choice?.delta?.content === "string") output += choice.delta.content;
+        if (typeof choice?.finish_reason === "string") trace.finishReason = redact(choice.finish_reason);
+      };
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        stillAlive();
+        bytes += part.value.byteLength;
+        if (bytes > 2000000) { await reader.cancel(); throw new AppError("The provider response exceeded the 2 MB safety limit.", 502); }
+        buffer += decoder.decode(part.value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? "";
+        lines.forEach(handle);
+      }
+      handle(buffer);
+    }
+    output = output.trim();
+    if (!output) throw new Error(`Provider returned no text content${trace.finishReason ? ` (finish reason: ${trace.finishReason})` : ""}.`);
+    if (trace.finishReason === "length") throw new Error(`The provider truncated the four-part response at ${maxOutputTokens} output tokens. Increase LLM_DESIGN_MAX_TOKENS or choose a model with more output capacity.`);
+    log("success");
+    return output;
+  } catch (error) {
+    const message = timeoutReason ? `${timeoutReason} ${output ? `${output.length.toLocaleString()} characters arrived before it stopped.` : "No text arrived."} Try again or choose a faster model.` : redact(error instanceof Error ? error.message : String(error));
+    log("error", message);
+    throw new AppError(`${label} failed after one API request. ${message}`, 502);
+  } finally {
+    clearTimeout(idleTimer);
+    clearTimeout(totalTimer);
+  }
 }
 
 export function recordDemo(session: Session, stage: string, input: unknown, output: unknown) {

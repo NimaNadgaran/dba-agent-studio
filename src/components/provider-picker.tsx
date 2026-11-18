@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useState } from "react";
-import { normalizeApiKey, credentialScope, matchingPreset, presetConfig, providerListSource, providerPresets } from "@/lib/provider-catalog";
+import { normalizeApiKey, credentialScope, matchingPreset, presetConfig, providerPresets } from "@/lib/provider-catalog";
 import type { ApiKeys, ProviderConfig } from "@/lib/types";
 
 type PickerProps = {
@@ -69,6 +69,5 @@ export function ProviderPicker({ config, onChange, apiKeys, onKeyChange, configu
       {result && <p className={`provider-result ${result.error ? "provider-error" : ""}`} role={result.error ? "alert" : "status"}>{result.message}</p>}
       <p className="helper-text">Keys stay in memory, scoped to this exact API endpoint, and clear on refresh. Free access can be rate-limited or unavailable.</p>
     </>}
-    <p className="helper-text"><a href={providerListSource} target="_blank" rel="noreferrer noopener">Teacher's free-provider list</a> · No personal API keys are included or committed.</p>
   </div>;
 }

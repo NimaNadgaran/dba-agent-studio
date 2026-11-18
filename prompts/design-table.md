@@ -1,6 +1,6 @@
 # Stage 4b: one table only
 
-Build ONLY data.target, using the confirmed requirements and saved plan. Return a compact JSON object {"table":{...}}. Do not repeat the plan, other tables, documents, SQL or reasoning. Previously generated parent tables are authoritative: never change their names, keys, column types or rows. Other tables are generated in separate requests.
+Build ONLY data.target, using the confirmed requirements, selected DBMS and saved plan rules. Return a compact JSON object {"table":{...}}. Do not repeat the plan, other tables, documents, SQL or reasoning. The parent data contains only primary and unique keys, their column definitions and sample key values. Use those definitions and values exactly. Other tables are generated in separate requests.
 
 Table contract:
 {"table":{"name":"requested_table_name","purpose":"Purpose, at least 10 characters","columns":[{"name":"id","type":"integer","nullable":false,"description":"Meaning of this attribute"}],"primaryKey":["id"],"unique":[],"foreignKeys":[],"checks":[],"indexes":[],"functionalDependencies":["id -> all non-key attributes"],"normalization":"Concise dependency-based 1NF, 2NF and 3NF assessment, at least 20 characters","rows":[{"id":1},{"id":2},{"id":3}]}}

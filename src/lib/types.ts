@@ -105,6 +105,8 @@ export type Artifact = { name: string; content: string; stage: Stage; updatedAt:
 export type CallLog = {
   id: string; at: string; stage: string; provider: string; model: string; attempt: number;
   durationMs: number; status: "success" | "error"; input: string; output: string; error?: string; baseUrl?: string; resolvedModel?: string;
+  subtask?: string; maxOutputTokens?: number; finishReason?: string; httpStatus?: number;
+  usage?: { inputTokens?: number; outputTokens?: number; reasoningTokens?: number };
 };
 export type Validation = {
   engine: string; status: "passed" | "failed" | "structural"; attempts: number; durationMs: number;
@@ -118,6 +120,7 @@ export type Session = {
   agentConfigs?: AgentConfigs;
   intake?: Intake; interview: { rounds: InterviewRound[]; pending: Question[]; ready: boolean; summary: string; rationale: string };
   choice?: Choice; design?: Design; designDraft?: DesignDraft; designVersion: number; approvedAt?: string;
+  designTextParts?: { name: string; title: string; content: string }[];
   artifacts: Record<string, Artifact>; changes: Change[]; logs: CallLog[];
   validation?: Validation; validationHistory: Validation[];
 };

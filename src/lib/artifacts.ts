@@ -31,6 +31,11 @@ export function writeDesign(session: Session) {
   writeChangelog(session);
 }
 
+export function writeDesignTextParts(session: Session) {
+  for (const part of session.designTextParts ?? []) artifact(session, part.name, part.content, 4);
+  artifact(session, "stage-4-output.md", (session.designTextParts ?? []).map(part => part.content).join("\n\n"), 4);
+}
+
 export function writeChangelog(session: Session) {
   artifact(session, "changelog.md", `# Design changelog\n\n${session.changes.map(change => `## v${change.version} — ${change.at}\n\n**Request:** ${change.request}\n\n${change.summary}\n\n**Affected files:** ${change.files.join(", ")}`).join("\n\n") || "Initial design generated. No revisions requested yet."}\n\n## Approval\n\n${session.approvedAt ? `Design v${session.designVersion} explicitly approved at ${session.approvedAt}.` : "Not yet approved. SQL generation is locked until explicit approval."}\n`, 5);
 }

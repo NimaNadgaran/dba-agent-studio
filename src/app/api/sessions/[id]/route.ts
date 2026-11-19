@@ -31,6 +31,7 @@ export async function POST(request: NextRequest, { params }: Params) {
       }
       catch (error) {
         original.logs = session.logs;
+        if (session.designDraft) original.designDraft = session.designDraft;
         await saveSession(original);
         return NextResponse.json({ error: error instanceof Error ? error.message : "Stage failed.", session: original }, { status: error instanceof AppError ? error.status : 500 });
       }

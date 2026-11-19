@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { artifact, designFileNames, writeChangelog, writeChoice, writeDesign, writeDesignTextParts, writeIntake, writeRequirements, writeValidation } from "./artifacts";
+import { artifact, designFileNames, writeChangelog, writeChoice, writeDesign, writeIntake, writeRequirements, writeValidation } from "./artifacts";
 import { demoAnswers, demoBrief, demoChoice, demoDesign, demoFollowups, demoIntake, demoQuestions } from "./demo";
 import { generateSQL, validateDesign } from "./design";
-import { advanceDesign, generateDesignTextParts } from "./design-generation";
+import { advanceDesign } from "./design-generation";
 import { callModel, environmentConfig, recordDemo } from "./provider";
 import { AppError, categories, choiceSchema, designSchema, intakeSchema, interviewSchema, type AgentConfigs, type ApiKeys, type Design, type ProviderConfig, type Session, type Stage } from "./types";
 import { validateSQL } from "./validation";
@@ -111,9 +111,15 @@ export async function transition(session: Session, action: WorkflowAction): Prom
       session.design = design; session.designVersion = 1;
       writeDesign(session); complete(session, 4, 5);
     } else {
-      session.designTextParts = await generateDesignTextParts(session, apiKey);
+      delete session.designTextParts;
+      const design = await advanceDesign(session, apiKey);
+      if (!design) return session;
+      validateDesign(design);
+      session.design = design;
       session.designVersion = 1;
-      writeDesignTextParts(session);
+      delete session.designDraft;
+      writeDesign(session);
+      complete(session, 4, 5);
     }
   } else if (action.action === "revision") {
     requireState(session.design && session.choice, "Generate a design before requesting revisions.");

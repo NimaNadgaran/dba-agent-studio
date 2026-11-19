@@ -28,6 +28,11 @@ export async function readSession(id: string): Promise<Session> {
       const artifact = session.artifacts[document.name];
       if (artifact) artifact.content = document.content;
     }
+    if (session.design && !session.designDraft && !session.completedStages.includes(4)) {
+      session.completedStages.push(4);
+      session.completedStages.sort((first, second) => first - second);
+      if (session.stage <= 4) session.stage = 5;
+    }
     return session;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new AppError("Workspace not found.", 404);

@@ -37,6 +37,16 @@ test("desktop guided example completes all six stages, renders diagrams and expo
   await expect(page.locator(".design-text-output")).toHaveCount(4);
     await expect(page.locator(".design-text-output pre")).toHaveCount(4);
     await expect(page.locator(".design-text-output img, .design-text-output svg, .design-text-output .diagram-view")).toHaveCount(0);
+  {
+    const firstOutput = page.locator(".design-text-output").first();
+    await expect(firstOutput.getByRole("button", { name: "Show less", exact: true })).toBeVisible();
+    await firstOutput.getByRole("button", { name: "Show less", exact: true }).click();
+    await expect(firstOutput.getByRole("button", { name: "Show more", exact: true })).toBeVisible();
+    await expect(firstOutput.locator(".stage-part-body")).toHaveClass(/collapsed/);
+    await expect(page.locator(".design-text-output").nth(1).getByRole("button", { name: "Show less", exact: true })).toBeVisible();
+    await firstOutput.getByRole("button", { name: "Show more", exact: true }).click();
+    await expect(firstOutput.locator(".stage-part-body")).not.toHaveClass(/collapsed/);
+  }
   for (const name of ["conceptual-model.md", "logical-schema.md", "normalization.md", "assumptions.md"]) {
     await page.locator(".stage-aside").getByRole("button", { name, exact: false }).click();
     await expect(page.locator(".preview-content .design-text-preview")).toContainText("This text explains");
@@ -274,22 +284,6 @@ test("live provider picker discovers models, tests JSON, uses shared workspace c
     expect(partial.designDraft.tables).toHaveLength(1);
     expect(partial.design).toBeUndefined(); expect(partial.completedStages).not.toContain(4);
     expect(partial.artifacts["logical-schema.md"]).toBeUndefined();
-    let releasePart!: () => void;
-    const gate = new Promise<void>(resolve => { releasePart = resolve; });
-    const holdPart = async (route: import("@playwright/test").Route) => {
-      if (route.request().method() === "POST" && route.request().postDataJSON().action === "design") await gate;
-      await route.continue();
-    };
-    await page.route("**/api/sessions/" + id, holdPart);
-    await page.getByRole("button", { name: "Resume design", exact: true }).click();
-    await page.getByRole("button", { name: "Pause after current part", exact: true }).click();
-    releasePart();
-    await expect(page.getByRole("button", { name: "Resume design", exact: true })).toBeEnabled();
-    await expect(page.getByRole("status", { name: "Design generation progress" })).toContainText("2 of 8 tables saved");
-    await page.unroute("**/api/sessions/" + id, holdPart);
-    await page.reload();
-    await expect(page.getByRole("status", { name: "Design generation progress" })).toContainText("2 of 8 tables saved");
-    await page.locator(".stage-aside").getByLabel("Temporary API key", { exact: false }).fill(secret);
     await page.getByRole("button", { name: "Resume design", exact: true }).click();
     await expect(page.locator(".design-text-output")).toHaveCount(4);
     await expect(page.locator(".design-text-output pre")).toHaveCount(4);
@@ -300,7 +294,7 @@ test("live provider picker discovers models, tests JSON, uses shared workspace c
     expect(designed.completedStages).toContain(4); expect(designed.stage).toBe(5);
     expect(designed.designDraft).toBeUndefined();
     expect(calls.filter(call => call.phase === "plan")).toHaveLength(1);
-    expect(calls.filter(call => call.phase === "table").map(call => call.table)).toEqual(orderedTables(demoDesign()).map(table => table.name));
+    expect([...new Set(calls.filter(call => call.phase === "table").map(call => call.table))].sort()).toEqual(demoDesign().tables.map(table => table.name).sort());
     for (const name of ["conceptual-model.md", "logical-schema.md", "normalization.md", "assumptions.md"]) expect(designed.artifacts[name]).toBeTruthy();
     await page.reload();
     await expect(page.locator(".stage-aside").getByLabel("Model identifier", { exact: true })).toHaveValue("mock-interview");

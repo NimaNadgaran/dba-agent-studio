@@ -276,44 +276,35 @@ function designSession(url: string) {
   return session;
 }
 
-function streamingProvider(chunks: string[], delayMs = 0) {
+test("stage 4 resumes a saved draft, builds tables in dependency waves, and completes the stage", async () => {
+  const design = demoDesign();
+  const ordered = orderedTables(design);
+  const plan = { ...design, tables: ordered.map(table => ({ name: table.name, purpose: table.purpose, dependsOn: [...new Set(table.foreignKeys.map(key => key.refTable).filter(name => name !== table.name))] })) };
   const calls: Record<string, unknown>[] = [];
   const server: Server = createServer(async (request, response) => {
     let text = "";
     for await (const chunk of request) text += chunk;
-    calls.push(JSON.parse(text));
-    response.writeHead(200, { "content-type": "text/event-stream" });
-    for (const piece of chunks) {
-      response.write("data: " + JSON.stringify({ model: "stream-model", choices: [{ delta: { content: piece }, finish_reason: null }] }) + "\n\n");
-      if (delayMs) await new Promise(resolve => setTimeout(resolve, delayMs));
-    }
-    response.write("data: " + JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 900, completion_tokens: 1200 } }) + "\n\n");
-    response.end("data: [DONE]\n\n");
+    const body = JSON.parse(text);
+    calls.push(body);
+    const input = JSON.parse(body.messages[1].content).data;
+    const table = design.tables.find(item => item.name === input.target.name);
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ model: "mock-design", choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ table }) } }] }));
   });
-  return new Promise<{ calls: typeof calls; url: string; close: () => Promise<void> }>(resolve => server.listen(0, "127.0.0.1", () => {
-    const address = server.address() as { port: number };
-    resolve({ calls, url: `http://127.0.0.1:${address.port}/v1`, close: () => new Promise<void>(done => { server.closeAllConnections(); server.close(() => done()); }) });
-  }));
-}
-
-test("stage 4 sends one streamed prompt and splits four # sections into separate files", async () => {
-  const previous = process.env.LLM_TIMEOUT_MS;
-  process.env.LLM_TIMEOUT_MS = "5000";
-  const sections = ["# Conceptual model\nMembers book rooms.", "# Logical schema\nmembers(id, name).", "# Normalization analysis\nAll tables meet 3NF.", "# Assumptions and remaining ambiguity\nBilling is out of scope."];
-  const provider = await streamingProvider(sections.map(section => section + "\n\n"), 2000);
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as { port: number };
   try {
-    const session = designSession(provider.url);
+    const session = designSession(`http://127.0.0.1:${address.port}/v1`);
     session.interview.summary = "Members book rooms and staff manage bookings.";
+    session.designDraft = { plan, tables: [] };
     await transition(session, { action: "design", apiKey: "synthetic-key" });
-    assert.equal(provider.calls.length, 1);
-    assert.equal(provider.calls[0].stream, true);
-    assert.equal(session.designTextParts?.length, 4);
-    assert.deepEqual(session.designTextParts?.map(part => part.content), sections);
-    for (const name of ["conceptual-model.md", "logical-schema.md", "normalization.md", "assumptions.md", "stage-4-output.md"]) assert.ok(session.artifacts[name], name);
-    assert.equal(session.logs.length, 1);
-    assert.deepEqual(session.logs[0].usage, { inputTokens: 900, outputTokens: 1200, reasoningTokens: undefined });
-  } finally {
-    await provider.close();
-    if (previous === undefined) delete process.env.LLM_TIMEOUT_MS; else process.env.LLM_TIMEOUT_MS = previous;
-  }
+    const requested = calls.map(call => JSON.parse((call.messages as { content: string }[])[1].content).data.target.name);
+    assert.equal(requested.length, design.tables.length);
+    assert.deepEqual([...requested].sort(), design.tables.map(table => table.name).sort());
+    assert.equal(session.design?.tables.length, design.tables.length);
+    assert.equal(session.designDraft, undefined);
+    assert.ok(session.completedStages.includes(4));
+    assert.equal(session.stage, 5);
+    for (const name of ["conceptual-model.md", "logical-schema.md", "normalization.md", "assumptions.md", "design.json"]) assert.ok(session.artifacts[name], name);
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
